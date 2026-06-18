@@ -9,14 +9,17 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
 
 import {
+  AssistantMessage,
   MessageList,
   MessageEditor,
   StreamingMessageContainer,
+  formatUsage,
 } from "@mariozechner/pi-web-ui";
 
 void MessageList;
 void MessageEditor;
 void StreamingMessageContainer;
+installAssistantMetadataRenderer();
 import type {
   ClientMessage,
   ServerMessage,
@@ -24,6 +27,69 @@ import type {
   SerializedAgentState,
   SessionListItem,
 } from "../shared/protocol.js";
+
+function formatTokensPerSecond(message: any): string | undefined {
+  const outputTokens = message?.usage?.output;
+  const startedAt = message?.timestamp;
+  const completedAt = message?.piWebuiCompletedAt;
+  if (!outputTokens || !startedAt || !completedAt || completedAt <= startedAt) return undefined;
+  const seconds = (completedAt - startedAt) / 1000;
+  if (seconds <= 0) return undefined;
+  return `${(outputTokens / seconds).toFixed(1)} tok/s`;
+}
+
+function assistantMetadata(message: any): string {
+  const parts = [];
+  if (message.usage) parts.push(formatUsage(message.usage));
+  if (message.timestamp) parts.push(formatRelativeTime(new Date(message.timestamp).toISOString()));
+  const tokensPerSecond = formatTokensPerSecond(message);
+  if (tokensPerSecond) parts.push(tokensPerSecond);
+  return parts.join(" · ");
+}
+
+function installAssistantMetadataRenderer() {
+  (AssistantMessage.prototype as any).render = function () {
+    const orderedParts = [];
+
+    for (const chunk of this.message.content) {
+      if (chunk.type === "text" && chunk.text.trim() !== "") {
+        orderedParts.push(html`<markdown-block .content=${chunk.text}></markdown-block>`);
+      } else if (chunk.type === "thinking" && chunk.thinking.trim() !== "") {
+        orderedParts.push(html`<thinking-block .content=${chunk.thinking} .isStreaming=${this.isStreaming}></thinking-block>`);
+      } else if (chunk.type === "toolCall" && !this.hideToolCalls) {
+        const tool = this.tools?.find((t: any) => t.name === chunk.name);
+        const pending = this.pendingToolCalls?.has(chunk.id) ?? false;
+        const result = this.toolResultsById?.get(chunk.id);
+        if (this.hidePendingToolCalls && pending && !result) continue;
+        const aborted = this.message.stopReason === "aborted" && !result;
+        orderedParts.push(html`<tool-message
+          .tool=${tool}
+          .toolCall=${chunk}
+          .result=${result}
+          .pending=${pending}
+          .aborted=${aborted}
+          .isStreaming=${this.isStreaming}
+        ></tool-message>`);
+      }
+    }
+
+    const metadata = this.message.usage && !this.isStreaming ? assistantMetadata(this.message) : "";
+    return html`
+      <div>
+        ${orderedParts.length ? html`<div class="px-4 flex flex-col gap-3">${orderedParts}</div>` : nothing}
+        ${metadata
+          ? this.onCostClick
+            ? html`<div class="px-4 mt-2 text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors" @click=${this.onCostClick}>${metadata}</div>`
+            : html`<div class="px-4 mt-2 text-xs text-muted-foreground">${metadata}</div>`
+          : nothing}
+        ${this.message.stopReason === "error" && this.message.errorMessage
+          ? html`<div class="mx-4 mt-3 p-3 bg-destructive/10 text-destructive rounded-lg text-sm overflow-hidden"><strong>Error:</strong> ${this.message.errorMessage}</div>`
+          : nothing}
+        ${this.message.stopReason === "aborted" ? html`<span class="text-sm text-destructive italic">Request aborted</span>` : nothing}
+      </div>
+    `;
+  };
+}
 
 // ── State ──
 

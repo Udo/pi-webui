@@ -142,11 +142,33 @@ function buildModelLookupCandidates(provider: string, modelId: string): Array<{ 
   return candidates;
 }
 
+function serializeMessages(session: AgentSession): any[] {
+  const messages = session.agent.state.messages;
+  const completedAtByKey = new Map<string, number[]>();
+  for (const entry of session.sessionManager.getBranch()) {
+    if (entry.type !== "message") continue;
+    const timestamp = new Date(entry.timestamp).getTime();
+    if (!Number.isFinite(timestamp)) continue;
+    const message = entry.message as any;
+    const key = `${message.role}:${message.timestamp ?? ""}`;
+    const queue = completedAtByKey.get(key) || [];
+    queue.push(timestamp);
+    completedAtByKey.set(key, queue);
+  }
+
+  return messages.map((message: any) => {
+    const key = `${message.role}:${message.timestamp ?? ""}`;
+    const completedAt = completedAtByKey.get(key)?.shift();
+    if (message.role !== "assistant" || !completedAt) return message;
+    return { ...message, piWebuiCompletedAt: completedAt };
+  });
+}
+
 function serializeState(session: AgentSession, overrides: Partial<Pick<SerializedAgentState, "isStreaming">> & { streamingMessage?: any } = {}): SerializedAgentState {
   const state = session.agent.state;
   const hasStreamingMessageOverride = Object.prototype.hasOwnProperty.call(overrides, "streamingMessage");
   return {
-    messages: state.messages,
+    messages: serializeMessages(session),
     model: state.model ? modelToInfo(state.model) : undefined,
     thinkingLevel: session.thinkingLevel,
     systemPrompt: state.systemPrompt,
