@@ -68,6 +68,10 @@ function getWsUrl(): string {
 }
 
 function connectWs() {
+  if (!getWebUiToken()) {
+    errorMessage = "Authentication token required. Open this page with ?token=<PI_WEBUI_TOKEN>.";
+  }
+
   ws = new WebSocket(getWsUrl());
 
   ws.onopen = () => {
@@ -112,6 +116,7 @@ function handleServerMessage(msg: ServerMessage) {
     case "ready": {
       agentReady = true;
       send({ type: "getModels" });
+      send({ type: "getSessions" });
       const lastPath = localStorage.getItem("pi-webui-session-path");
       if (lastPath) {
         send({ type: "loadSession", sessionPath: lastPath });
@@ -120,7 +125,6 @@ function handleServerMessage(msg: ServerMessage) {
       }
       if (sidebarOpen) {
         sessionsLoading = true;
-        send({ type: "getSessions" });
       }
       renderApp();
       break;
@@ -427,9 +431,13 @@ function renderSidebar() {
           <div class="sidebar-empty">
             Loading sessions...
           </div>
+        ` : sessionList.length === 0 && (!connected || !agentReady) ? html`
+          <div class="sidebar-empty">
+            ${getWebUiToken() ? "Connecting..." : "Authentication token required"}
+          </div>
         ` : sessionList.length === 0 ? html`
           <div class="sidebar-empty">
-            No sessions yet
+            No sessions found
           </div>
         ` : sessionList.map((s) => html`
           <button
