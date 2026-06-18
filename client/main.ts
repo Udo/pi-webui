@@ -478,7 +478,7 @@ function renderApp() {
                       class="model-option w-full text-left px-3 py-2 hover:bg-accent transition-colors ${m.provider === currentModel?.provider && m.id === currentModel?.id ? 'model-option-current' : ''}"
                       @click=${() => handleModelSelect(m)}
                     >
-                      ${modelLabel(m)}${m.scoped ? html` <span class="model-scope-tag">scoped</span>` : nothing}
+                      ${modelLabel(m)}
                     </button>
                   `
                 )}

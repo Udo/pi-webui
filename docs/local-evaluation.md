@@ -39,6 +39,8 @@ The app vendors B612 regular/bold under `client/fonts/` and applies it globally 
 
 The model selector shows scoped/default Pi models first by default. Use the dropdown's `Show all` control to include every available local/openai-codex model.
 
+The sessions sidebar is intentionally limited and cached: `SESSION_LIST_LIMIT` defaults to `50`, and `SESSION_LIST_CACHE_MS` defaults to `10000`. This avoids parsing every historical JSONL file on each sidebar open.
+
 Hugging Face, GitHub Copilot, and Anthropic provider auth were removed from the local Pi config/environment during evaluation; current expected providers are `local` and `openai-codex`.
 
 ## Repository remotes

@@ -42,6 +42,8 @@ app.get("/{*path}", (_req, res) => {
 
 const HOME_DIR = os.homedir();
 const AGENT_SETTINGS_PATH = path.join(HOME_DIR, ".pi", "agent", "settings.json");
+const SESSION_LIST_LIMIT = parseInt(process.env.SESSION_LIST_LIMIT || "50");
+const SESSION_LIST_CACHE_MS = parseInt(process.env.SESSION_LIST_CACHE_MS || "10000");
 
 let session: AgentSession;
 let authStorage: AuthStorage;
@@ -49,6 +51,7 @@ let modelRegistry: ModelRegistry;
 let sessionUnsubscribe: (() => void) | undefined;
 const clients = new Set<WebSocket>();
 const syntheticModels = new Map<string, Model<Api>>();
+let sessionListCache: { expires: number; items: SessionListItem[] } | undefined;
 
 function modelToInfo(model: Model<Api>, scoped = false): ModelInfo {
   return {
@@ -126,6 +129,107 @@ function send(ws: WebSocket, msg: ServerMessage) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
   }
+}
+
+function getSessionDir(cwd: string): string {
+  const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+  return path.join(HOME_DIR, ".pi", "agent", "sessions", safePath);
+}
+
+function extractTextContent(message: any): string {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join(" ")
+    .trim();
+}
+
+function sessionItemFromContent(filePath: string, content: string, mtime: Date): SessionListItem | undefined {
+  const lines = content.trim().split("\n").filter(Boolean);
+  if (lines.length === 0) return undefined;
+
+  const entries: any[] = [];
+  for (const line of lines) {
+    try {
+      entries.push(JSON.parse(line));
+    } catch {
+      // Ignore malformed/incomplete append lines.
+    }
+  }
+
+  const header = entries[0];
+  if (header?.type !== "session" || typeof header.id !== "string") return undefined;
+
+  let name: string | undefined;
+  let firstMessage = "";
+  let messageCount = 0;
+  let modifiedTime = new Date(header.timestamp).getTime();
+
+  for (const entry of entries) {
+    if (typeof entry.timestamp === "string") {
+      const t = new Date(entry.timestamp).getTime();
+      if (!Number.isNaN(t)) modifiedTime = Math.max(modifiedTime || 0, t);
+    }
+    if (entry.type === "session_info") {
+      name = entry.name?.trim() || undefined;
+    }
+    if (entry.type !== "message") continue;
+    messageCount++;
+    if (firstMessage || entry.message?.role !== "user") continue;
+    firstMessage = extractTextContent(entry.message);
+  }
+
+  const created = new Date(header.timestamp);
+  const modified = modifiedTime ? new Date(modifiedTime) : mtime;
+  return {
+    id: header.id,
+    path: filePath,
+    name,
+    cwd: typeof header.cwd === "string" ? header.cwd : "",
+    created: created.toISOString(),
+    modified: modified.toISOString(),
+    messageCount,
+    firstMessage: firstMessage || "(no messages)",
+  };
+}
+
+async function listRecentSessions(): Promise<SessionListItem[]> {
+  const now = Date.now();
+  if (sessionListCache && sessionListCache.expires > now) {
+    return sessionListCache.items;
+  }
+
+  const dir = getSessionDir(HOME_DIR);
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+  const files = await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+    .map(async (entry) => {
+      const filePath = path.join(dir, entry.name);
+      const stats = await fs.promises.stat(filePath).catch(() => undefined);
+      return stats ? { filePath, mtime: stats.mtime } : undefined;
+    }));
+
+  const newest = files
+    .filter((file): file is { filePath: string; mtime: Date } => Boolean(file))
+    .sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
+    .slice(0, SESSION_LIST_LIMIT);
+
+  const items = (await Promise.all(newest.map(async ({ filePath, mtime }) => {
+    const content = await fs.promises.readFile(filePath, "utf8").catch(() => "");
+    return content ? sessionItemFromContent(filePath, content, mtime) : undefined;
+  })))
+    .filter((item): item is SessionListItem => Boolean(item))
+    .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+
+  sessionListCache = { expires: now + SESSION_LIST_CACHE_MS, items };
+  return items;
+}
+
+function clearSessionListCache() {
+  sessionListCache = undefined;
 }
 
 async function fetchLiteLLMModels(): Promise<ModelInfo[]> {
@@ -338,6 +442,10 @@ function setupSessionEvents() {
     const safeEvent = safeSerializeEvent(event);
     broadcast({ type: "agentEvent", event: safeEvent });
 
+    if (event.type === "message_end" || event.type === "turn_end") {
+      clearSessionListCache();
+    }
+
     if (
       event.type === "agent_start" ||
       event.type === "agent_end" ||
@@ -424,6 +532,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
 
         const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR));
         session = newSession;
+        clearSessionListCache();
         setupSessionEvents();
         broadcast({ type: "sessionChanged", sessionId: session.sessionId });
         broadcast({ type: "stateSync", state: serializeState() });
@@ -431,19 +540,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         break;
       }
       case "getSessions": {
-        const sessionInfos = await SessionManager.list(HOME_DIR);
-        const items: SessionListItem[] = sessionInfos
-          .sort((a, b) => b.modified.getTime() - a.modified.getTime())
-          .map((s) => ({
-            id: s.id,
-            path: s.path,
-            name: s.name,
-            cwd: s.cwd,
-            created: s.created.toISOString(),
-            modified: s.modified.toISOString(),
-            messageCount: s.messageCount,
-            firstMessage: s.firstMessage,
-          }));
+        const items = await listRecentSessions();
         send(ws, { type: "sessions", sessions: items, currentSessionId: session.sessionId });
         break;
       }
@@ -456,6 +553,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         const loadedManager = SessionManager.open(msg.sessionPath, undefined, HOME_DIR);
         const { session: loadedSession } = await createWebUiSession(loadedManager);
         session = loadedSession;
+        clearSessionListCache();
         setupSessionEvents();
         broadcast({ type: "sessionChanged", sessionId: session.sessionId });
         broadcast({ type: "stateSync", state: serializeState() });

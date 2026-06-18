@@ -80,7 +80,6 @@ textarea {
 .model-option,
 .model-scope-row,
 .model-scope-toggle,
-.model-scope-tag,
 .status-pill,
 .tool-count,
 .empty-state,
@@ -250,11 +249,6 @@ textarea {
 
 .model-scope-toggle:hover {
   background: var(--accent);
-}
-
-.model-scope-tag {
-  color: var(--muted-foreground);
-  margin-left: var(--app-space-2);
 }
 
 @media (max-width: 767px) {
