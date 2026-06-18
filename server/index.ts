@@ -1,5 +1,6 @@
 import express from "express";
 import { createServer } from "http";
+import fs from "fs";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -39,6 +40,7 @@ app.get("/{*path}", (_req, res) => {
 });
 
 const HOME_DIR = os.homedir();
+const AGENT_SETTINGS_PATH = path.join(HOME_DIR, ".pi", "agent", "settings.json");
 
 let session: AgentSession;
 let authStorage: AuthStorage;
@@ -146,16 +148,16 @@ async function fetchLiteLLMModels(): Promise<ModelInfo[]> {
   }
 }
 
-function getRegistryModels(): ModelInfo[] {
-  return modelRegistry
-    .getAll()
-    .filter((m) => m.provider === "ollama")
-    .map(modelToInfo);
+async function getRegistryModels(): Promise<ModelInfo[]> {
+  const available = await modelRegistry.getAvailable();
+  const configured = available.filter((m) => modelRegistry.hasConfiguredAuth(m));
+  const source = configured.length > 0 ? configured : available;
+  return source.map(modelToInfo);
 }
 
 async function getModels(): Promise<ModelInfo[]> {
   const litellmModels = await fetchLiteLLMModels();
-  const registryModels = getRegistryModels();
+  const registryModels = await getRegistryModels();
 
   // Merge: registry models first, then any LiteLLM models not already in registry
   const seen = new Set(registryModels.map((m) => `${m.provider}/${m.id}`));
@@ -172,6 +174,72 @@ async function getModels(): Promise<ModelInfo[]> {
 
 function findModel(provider: string, modelId: string): Model<Api> | undefined {
   return modelRegistry.find(provider, modelId);
+}
+
+function getModelFromReference(reference: string | undefined): Model<Api> | undefined {
+  const trimmed = reference?.trim();
+  if (!trimmed) return undefined;
+
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash === trimmed.length - 1) return undefined;
+
+  const provider = trimmed.slice(0, slash);
+  const modelId = trimmed.slice(slash + 1);
+  const model = modelRegistry.find(provider, modelId);
+  return model && modelRegistry.hasConfiguredAuth(model) ? model : undefined;
+}
+
+function readAgentSettings(): any {
+  try {
+    return JSON.parse(fs.readFileSync(AGENT_SETTINGS_PATH, "utf8"));
+  } catch (err) {
+    console.warn(`Could not read Pi settings from ${AGENT_SETTINGS_PATH}:`, err);
+    return {};
+  }
+}
+
+async function resolveInitialWebUiModel(): Promise<Model<Api> | undefined> {
+  const settings = readAgentSettings();
+
+  // Explicit web UI override, useful for local evaluation without changing Pi's global default.
+  const explicit = getModelFromReference(process.env.PI_WEBUI_MODEL || process.env.PI_MODEL);
+  if (explicit) return explicit;
+
+  const defaultProvider = typeof settings.defaultProvider === "string" ? settings.defaultProvider : undefined;
+  const defaultModel = typeof settings.defaultModel === "string" ? settings.defaultModel : undefined;
+  if (defaultProvider && defaultModel) {
+    const configuredDefault = modelRegistry.find(defaultProvider, defaultModel);
+    if (configuredDefault && modelRegistry.hasConfiguredAuth(configuredDefault)) {
+      return configuredDefault;
+    }
+    console.warn(`Configured Pi default model is not available in this SDK: ${defaultProvider}/${defaultModel}`);
+  }
+
+  // The interactive local Pi agent also scopes/cycles models from enabledModels; use the first
+  // configured entry there before falling back to provider defaults like Anthropic Opus.
+  if (Array.isArray(settings.enabledModels)) {
+    for (const reference of settings.enabledModels) {
+      if (typeof reference !== "string") continue;
+      const model = getModelFromReference(reference);
+      if (model) return model;
+    }
+  }
+
+  const available = await modelRegistry.getAvailable();
+  return available.find((m) => m.provider === "local" && modelRegistry.hasConfiguredAuth(m))
+    || available.find((m) => m.provider !== "anthropic" && modelRegistry.hasConfiguredAuth(m))
+    || available.find((m) => modelRegistry.hasConfiguredAuth(m));
+}
+
+async function createWebUiSession(sessionManager: SessionManager) {
+  const initialModel = await resolveInitialWebUiModel();
+  return createAgentSession({
+    cwd: HOME_DIR,
+    authStorage,
+    modelRegistry,
+    sessionManager,
+    model: initialModel,
+  });
 }
 
 function safeSerializeEvent(event: AgentSessionEvent): any {
@@ -275,12 +343,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         }
         if (sessionUnsubscribe) sessionUnsubscribe();
 
-        const { session: newSession } = await createAgentSession({
-          cwd: HOME_DIR,
-          authStorage,
-          modelRegistry,
-          sessionManager: SessionManager.create(HOME_DIR),
-        });
+        const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR));
         session = newSession;
         setupSessionEvents();
         broadcast({ type: "sessionChanged", sessionId: session.sessionId });
@@ -312,12 +375,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         if (sessionUnsubscribe) sessionUnsubscribe();
 
         const loadedManager = SessionManager.open(msg.sessionPath, undefined, HOME_DIR);
-        const { session: loadedSession } = await createAgentSession({
-          cwd: HOME_DIR,
-          authStorage,
-          modelRegistry,
-          sessionManager: loadedManager,
-        });
+        const { session: loadedSession } = await createWebUiSession(loadedManager);
         session = loadedSession;
         setupSessionEvents();
         broadcast({ type: "sessionChanged", sessionId: session.sessionId });
@@ -343,12 +401,7 @@ async function main() {
     if (key) litellmKey = key;
   }
 
-  const { session: agentSession, modelFallbackMessage } = await createAgentSession({
-    cwd: HOME_DIR,
-    authStorage,
-    modelRegistry,
-    sessionManager: SessionManager.create(HOME_DIR),
-  });
+  const { session: agentSession, modelFallbackMessage } = await createWebUiSession(SessionManager.create(HOME_DIR));
 
   session = agentSession;
 
