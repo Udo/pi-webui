@@ -100,15 +100,16 @@ function buildModelLookupCandidates(provider: string, modelId: string): Array<{ 
   return candidates;
 }
 
-function serializeState(): SerializedAgentState {
+function serializeState(overrides: Partial<Pick<SerializedAgentState, "isStreaming">> & { streamingMessage?: any } = {}): SerializedAgentState {
   const state = session.agent.state;
+  const hasStreamingMessageOverride = Object.prototype.hasOwnProperty.call(overrides, "streamingMessage");
   return {
     messages: state.messages,
     model: state.model ? modelToInfo(state.model) : undefined,
     thinkingLevel: session.thinkingLevel,
     systemPrompt: state.systemPrompt,
-    isStreaming: state.isStreaming,
-    streamingMessage: state.streamingMessage,
+    isStreaming: overrides.isStreaming ?? state.isStreaming,
+    streamingMessage: hasStreamingMessageOverride ? overrides.streamingMessage : state.streamingMessage,
     errorMessage: state.errorMessage,
     tools: session.getActiveToolNames(),
     sessionId: session.sessionId,
@@ -452,7 +453,10 @@ function setupSessionEvents() {
       event.type === "message_end" ||
       event.type === "turn_end"
     ) {
-      broadcast({ type: "stateSync", state: serializeState() });
+      const state = event.type === "agent_end"
+        ? serializeState({ isStreaming: false, streamingMessage: null })
+        : serializeState();
+      broadcast({ type: "stateSync", state });
     }
   });
 }
