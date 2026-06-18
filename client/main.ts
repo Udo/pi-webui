@@ -29,6 +29,7 @@ import type {
 
 let ws: WebSocket | null = null;
 let connected = false;
+let agentReady = false;
 let messages: AgentMessage[] = [];
 let isStreaming = false;
 let streamingMessage: AgentMessage | null = null;
@@ -71,12 +72,15 @@ function connectWs() {
 
   ws.onopen = () => {
     connected = true;
+    agentReady = false;
     renderApp();
   };
 
   ws.onclose = () => {
     connected = false;
+    agentReady = false;
     ws = null;
+    sessionsLoading = false;
     renderApp();
     setTimeout(connectWs, 2000);
   };
@@ -106,6 +110,7 @@ function send(msg: ClientMessage) {
 function handleServerMessage(msg: ServerMessage) {
   switch (msg.type) {
     case "ready": {
+      agentReady = true;
       send({ type: "getModels" });
       const lastPath = localStorage.getItem("pi-webui-session-path");
       if (lastPath) {
@@ -113,6 +118,11 @@ function handleServerMessage(msg: ServerMessage) {
       } else {
         send({ type: "getState" });
       }
+      if (sidebarOpen) {
+        sessionsLoading = true;
+        send({ type: "getSessions" });
+      }
+      renderApp();
       break;
     }
 
@@ -139,6 +149,7 @@ function handleServerMessage(msg: ServerMessage) {
 
     case "error":
       errorMessage = msg.message;
+      sessionsLoading = false;
       if (errorClearTimer) window.clearTimeout(errorClearTimer);
       renderApp();
       errorClearTimer = window.setTimeout(() => {
@@ -317,7 +328,9 @@ function toggleSidebar() {
   sidebarOpen = !sidebarOpen;
   if (sidebarOpen) {
     sessionsLoading = true;
-    send({ type: "getSessions" });
+    if (agentReady) {
+      send({ type: "getSessions" });
+    }
   }
   renderApp();
 }
