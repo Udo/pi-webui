@@ -25,7 +25,8 @@ import type {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.PORT || "3001");
 const HOST = process.env.HOST || "127.0.0.1";
-const LITELLM_URL = process.env.LITELLM_URL || "http://192.168.50.240:4000";
+const LITELLM_URL = process.env.LITELLM_URL || "";
+const LITELLM_TIMEOUT_MS = parseInt(process.env.LITELLM_TIMEOUT_MS || "1500");
 let litellmKey = process.env.LITELLM_KEY || "";
 
 const app = express();
@@ -47,6 +48,7 @@ let authStorage: AuthStorage;
 let modelRegistry: ModelRegistry;
 let sessionUnsubscribe: (() => void) | undefined;
 const clients = new Set<WebSocket>();
+const syntheticModels = new Map<string, Model<Api>>();
 
 function modelToInfo(model: Model<Api>): ModelInfo {
   return {
@@ -126,44 +128,120 @@ function send(ws: WebSocket, msg: ServerMessage) {
 }
 
 async function fetchLiteLLMModels(): Promise<ModelInfo[]> {
+  if (!LITELLM_URL) return [];
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LITELLM_TIMEOUT_MS);
   try {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (litellmKey) {
       headers["Authorization"] = `Bearer ${litellmKey}`;
     }
-    const res = await fetch(`${LITELLM_URL}/v1/models`, { headers });
+    const res = await fetch(`${LITELLM_URL}/v1/models`, { headers, signal: controller.signal });
     if (!res.ok) {
       console.error(`LiteLLM /v1/models returned ${res.status}`);
       return [];
     }
     const json = await res.json() as { data?: Array<{ id: string; owned_by?: string }> };
     return (json.data || []).map((m) => ({
-      provider: "ollama",
+      provider: "litellm",
       id: m.id.trim(),
       name: m.id.trim(),
     }));
   } catch (err) {
     console.error("Failed to fetch LiteLLM models:", err);
     return [];
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
+function modelKey(provider: string, modelId: string): string {
+  return `${provider}/${modelId}`;
+}
+
+function parseModelReference(reference: string | undefined): { provider: string; modelId: string } | undefined {
+  const trimmed = reference?.trim();
+  if (!trimmed) return undefined;
+  const thinkingSuffixes = [":off", ":minimal", ":low", ":medium", ":high"];
+  const suffix = thinkingSuffixes.find((value) => trimmed.endsWith(value));
+  const withoutThinking = suffix ? trimmed.slice(0, -suffix.length) : trimmed;
+  const slash = withoutThinking.indexOf("/");
+  if (slash <= 0 || slash === withoutThinking.length - 1) return undefined;
+  return {
+    provider: withoutThinking.slice(0, slash),
+    modelId: withoutThinking.slice(slash + 1),
+  };
+}
+
+function buildSyntheticModel(provider: string, modelId: string): Model<Api> | undefined {
+  const key = modelKey(provider, modelId);
+  const existing = syntheticModels.get(key);
+  if (existing) return existing;
+
+  const providerModels = modelRegistry.getAll().filter((m) => m.provider === provider);
+  const base = providerModels.find((m) => modelRegistry.hasConfiguredAuth(m)) || providerModels[0];
+  if (!base) return undefined;
+
+  const model: Model<Api> = {
+    ...base,
+    id: modelId,
+    name: modelId,
+  };
+  syntheticModels.set(key, model);
+  return model;
+}
+
+function findConfiguredOrSyntheticModel(provider: string, modelId: string): Model<Api> | undefined {
+  const model = modelRegistry.find(provider, modelId) || syntheticModels.get(modelKey(provider, modelId));
+  if (model && modelRegistry.hasConfiguredAuth(model)) return model;
+  const synthetic = buildSyntheticModel(provider, modelId);
+  return synthetic && modelRegistry.hasConfiguredAuth(synthetic) ? synthetic : undefined;
+}
+
+function addModelInfo(merged: ModelInfo[], seen: Set<string>, model: Model<Api>) {
+  const key = modelKey(model.provider, model.id);
+  if (seen.has(key)) return;
+  seen.add(key);
+  merged.push(modelToInfo(model));
+}
+
 async function getRegistryModels(): Promise<ModelInfo[]> {
+  const settings = readAgentSettings();
   const available = await modelRegistry.getAvailable();
   const configured = available.filter((m) => modelRegistry.hasConfiguredAuth(m));
   const source = configured.length > 0 ? configured : available;
-  return source.map(modelToInfo);
+  const merged: ModelInfo[] = [];
+  const seen = new Set<string>();
+
+  for (const reference of [
+    process.env.PI_WEBUI_MODEL,
+    process.env.PI_MODEL,
+    settings.defaultProvider && settings.defaultModel ? `${settings.defaultProvider}/${settings.defaultModel}` : undefined,
+    ...(Array.isArray(settings.enabledModels) ? settings.enabledModels : []),
+  ]) {
+    if (typeof reference !== "string") continue;
+    const parsed = parseModelReference(reference);
+    if (!parsed) continue;
+    const model = findConfiguredOrSyntheticModel(parsed.provider, parsed.modelId);
+    if (model) addModelInfo(merged, seen, model);
+  }
+
+  for (const model of source) {
+    addModelInfo(merged, seen, model);
+  }
+
+  return merged;
 }
 
 async function getModels(): Promise<ModelInfo[]> {
-  const litellmModels = await fetchLiteLLMModels();
   const registryModels = await getRegistryModels();
+  const litellmModels = await fetchLiteLLMModels();
 
-  // Merge: registry models first, then any LiteLLM models not already in registry
-  const seen = new Set(registryModels.map((m) => `${m.provider}/${m.id}`));
+  const seen = new Set(registryModels.map((m) => modelKey(m.provider, m.id)));
   const merged = [...registryModels];
   for (const m of litellmModels) {
-    const key = `${m.provider}/${m.id}`;
+    const key = modelKey(m.provider, m.id);
     if (!seen.has(key)) {
       merged.push(m);
       seen.add(key);
@@ -173,20 +251,12 @@ async function getModels(): Promise<ModelInfo[]> {
 }
 
 function findModel(provider: string, modelId: string): Model<Api> | undefined {
-  return modelRegistry.find(provider, modelId);
+  return findConfiguredOrSyntheticModel(provider, modelId);
 }
 
 function getModelFromReference(reference: string | undefined): Model<Api> | undefined {
-  const trimmed = reference?.trim();
-  if (!trimmed) return undefined;
-
-  const slash = trimmed.indexOf("/");
-  if (slash <= 0 || slash === trimmed.length - 1) return undefined;
-
-  const provider = trimmed.slice(0, slash);
-  const modelId = trimmed.slice(slash + 1);
-  const model = modelRegistry.find(provider, modelId);
-  return model && modelRegistry.hasConfiguredAuth(model) ? model : undefined;
+  const parsed = parseModelReference(reference);
+  return parsed ? findConfiguredOrSyntheticModel(parsed.provider, parsed.modelId) : undefined;
 }
 
 function readAgentSettings(): any {
@@ -208,8 +278,8 @@ async function resolveInitialWebUiModel(): Promise<Model<Api> | undefined> {
   const defaultProvider = typeof settings.defaultProvider === "string" ? settings.defaultProvider : undefined;
   const defaultModel = typeof settings.defaultModel === "string" ? settings.defaultModel : undefined;
   if (defaultProvider && defaultModel) {
-    const configuredDefault = modelRegistry.find(defaultProvider, defaultModel);
-    if (configuredDefault && modelRegistry.hasConfiguredAuth(configuredDefault)) {
+    const configuredDefault = findConfiguredOrSyntheticModel(defaultProvider, defaultModel);
+    if (configuredDefault) {
       return configuredDefault;
     }
     console.warn(`Configured Pi default model is not available in this SDK: ${defaultProvider}/${defaultModel}`);

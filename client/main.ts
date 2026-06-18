@@ -338,36 +338,35 @@ function sessionTitle(s: SessionListItem): string {
   return `Session ${s.id.slice(0, 8)}`;
 }
 
+function modelLabel(model: ModelInfo): string {
+  return `${model.provider}/${model.id}`;
+}
+
+function modelMatchesFilter(model: ModelInfo, filter: string): boolean {
+  const needle = filter.trim().toLowerCase();
+  if (!needle) return true;
+  return [model.provider, model.id, model.name, modelLabel(model)]
+    .some((value) => value.toLowerCase().includes(needle));
+}
+
 function renderSidebar() {
   return html`
     <div class="sidebar-inner h-full flex flex-col">
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--border);flex-shrink:0">
-        <span style="font-size:14px;font-weight:600;color:var(--foreground)">Sessions</span>
+      <div class="sidebar-header">
+        <span class="sidebar-title">Sessions</span>
         <div style="display:flex;align-items:center;gap:4px">
-          <button
-            style="padding:6px;border-radius:6px;border:none;background:transparent;cursor:pointer;color:var(--foreground);display:flex"
-            title="New session"
-            @click=${handleNewSession}
-            @mouseenter=${(e: Event) => (e.currentTarget as HTMLElement).style.background = 'var(--accent)'}
-            @mouseleave=${(e: Event) => (e.currentTarget as HTMLElement).style.background = 'transparent'}
-          >${icon(Plus, "sm")}</button>
-          <button
-            style="padding:6px;border-radius:6px;border:none;background:transparent;cursor:pointer;color:var(--foreground);display:flex"
-            title="Close sidebar"
-            @click=${closeSidebar}
-            @mouseenter=${(e: Event) => (e.currentTarget as HTMLElement).style.background = 'var(--accent)'}
-            @mouseleave=${(e: Event) => (e.currentTarget as HTMLElement).style.background = 'transparent'}
-          >${icon(PanelLeftClose, "sm")}</button>
+          <button class="icon-button" title="New session" @click=${handleNewSession}>${icon(Plus, "sm")}</button>
+          <button class="icon-button" title="Close sidebar" @click=${closeSidebar}>${icon(PanelLeftClose, "sm")}</button>
         </div>
       </div>
 
       <div class="flex-1 overflow-y-auto">
         ${sessionsLoading ? html`
-          <div style="display:flex;align-items:center;justify-content:center;padding:48px 0;color:var(--muted-foreground);font-size:13px">
+          <div class="sidebar-empty">
             Loading sessions...
           </div>
         ` : sessionList.length === 0 ? html`
-          <div style="display:flex;align-items:center;justify-content:center;padding:48px 0;color:var(--muted-foreground);font-size:13px">
+          <div class="sidebar-empty">
             No sessions yet
           </div>
         ` : sessionList.map((s) => html`
@@ -422,7 +421,7 @@ function renderApp() {
 
         <span class="font-semibold text-sm shrink-0 hidden sm:inline">Pi Web UI</span>
 
-        <span class="text-[10px] px-1.5 py-0.5 rounded-full shrink-0 ${connected ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}">
+        <span class="status-pill px-1.5 py-0.5 rounded-full shrink-0 ${connected ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}">
           ${connected ? "Connected" : "Disconnected"}
         </span>
 
@@ -432,17 +431,15 @@ function renderApp() {
         <div class="relative shrink-0">
           <button
             id="model-trigger"
-            class="flex items-center gap-1 px-2 py-1 text-xs rounded border border-border hover:bg-accent transition-colors"
+            class="model-button flex items-center gap-1 px-2 py-1 rounded border border-border hover:bg-accent transition-colors"
             @click=${toggleModelDropdown}
           >
-            <span class="max-w-[120px] sm:max-w-[200px] truncate">${currentModel?.id || "No model"}</span>
+            <span class="max-w-[180px] sm:max-w-[280px] truncate">${currentModel ? modelLabel(currentModel) : "No model"}</span>
             ${icon(ChevronDown, "xs")}
           </button>
           ${showModelDropdown ? (() => {
-            const sorted = [...availableModels].sort((a, b) => a.id.localeCompare(b.id));
-            const filtered = modelFilter
-              ? sorted.filter((m) => m.id.toLowerCase().includes(modelFilter.toLowerCase()))
-              : sorted;
+            const sorted = [...availableModels].sort((a, b) => modelLabel(a).localeCompare(modelLabel(b)));
+            const filtered = sorted.filter((m) => modelMatchesFilter(m, modelFilter));
             return html`
             <div
               id="model-dropdown"
@@ -453,7 +450,7 @@ function renderApp() {
                   id="model-filter"
                   type="text"
                   placeholder="Filter models..."
-                  class="w-full px-2 py-1 text-xs rounded border border-border bg-background text-foreground outline-none"
+                  class="model-filter w-full px-2 py-1 rounded border border-border bg-background text-foreground outline-none"
                   .value=${modelFilter}
                   @input=${(e: Event) => { modelFilter = (e.target as HTMLInputElement).value; renderApp(); requestAnimationFrame(() => document.getElementById("model-filter")?.focus()); }}
                   @keydown=${(e: KeyboardEvent) => { if (e.key === "Escape") { showModelDropdown = false; renderApp(); }}}
@@ -463,14 +460,14 @@ function renderApp() {
                 ${filtered.map(
                   (m) => html`
                     <button
-                      class="w-full text-left px-3 py-2 text-xs hover:bg-accent transition-colors ${m.id === currentModel?.id ? 'bg-accent/50' : ''}"
+                      class="model-option w-full text-left px-3 py-2 hover:bg-accent transition-colors ${m.provider === currentModel?.provider && m.id === currentModel?.id ? 'model-option-current' : ''}"
                       @click=${() => handleModelSelect(m)}
                     >
-                      ${m.id}
+                      ${modelLabel(m)}
                     </button>
                   `
                 )}
-                ${filtered.length === 0 ? html`<div class="px-3 py-2 text-xs text-muted-foreground">No matches</div>` : ""}
+                ${filtered.length === 0 ? html`<div class="model-option px-3 py-2 text-muted-foreground">No matches</div>` : ""}
               </div>
             </div>
           `; })() : ""}
