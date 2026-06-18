@@ -32,6 +32,7 @@ npm run build
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `3001` | Server listen port |
+| `HOST` | `127.0.0.1` | Server listen address. Use `0.0.0.0` only on a trusted network or behind authentication. |
 | `LITELLM_URL` | `http://192.168.50.240:4000` | LiteLLM API base URL |
 | `LITELLM_KEY` | *(from ~/.pi/agent)* | LiteLLM API key (auto-detected from Pi config if unset) |
 
@@ -47,7 +48,7 @@ Starts the server (`tsx watch`) on port 3001 and Vite dev server on port 5173 wi
 
 ```bash
 npm run build
-PORT=8085 npm start
+HOST=127.0.0.1 PORT=8085 npm start
 ```
 
 Or use the systemd user service:

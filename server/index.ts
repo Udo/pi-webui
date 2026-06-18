@@ -23,6 +23,7 @@ import type {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.PORT || "3001");
+const HOST = process.env.HOST || "127.0.0.1";
 const LITELLM_URL = process.env.LITELLM_URL || "http://192.168.50.240:4000";
 let litellmKey = process.env.LITELLM_KEY || "";
 
@@ -383,8 +384,8 @@ async function main() {
     });
   });
 
-  server.listen(PORT, () => {
-    console.log(`Pi WebUI server listening on http://localhost:${PORT}`);
+  server.listen(PORT, HOST, () => {
+    console.log(`Pi WebUI server listening on http://${HOST}:${PORT}`);
   });
 }
 
