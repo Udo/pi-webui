@@ -168,10 +168,6 @@ function handleServerMessage(msg: ServerMessage) {
 
     case "sessionChanged":
       currentSessionId = msg.sessionId;
-      if (sidebarOpen) {
-        sessionsLoading = true;
-        send({ type: "getSessions" });
-      }
       renderApp();
       requestAnimationFrame(() => scrollMessagesToBottom(true));
       break;
@@ -341,6 +337,7 @@ function closeSidebar() {
 }
 
 function handleLoadSession(sessionPath: string) {
+  if (sessionPath === currentSessionPath) return;
   send({ type: "loadSession", sessionPath });
 }
 
