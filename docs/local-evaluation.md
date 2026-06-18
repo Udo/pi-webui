@@ -1,17 +1,22 @@
-# Local evaluation on aiworker
+# Local evaluation
 
-This fork is evaluated from `/root/projects/pi-webui` on the aiworker container.
+This app exposes a real Pi coding-agent session with filesystem and shell tools. Treat any reachable instance as a remote-code-execution service for the account running `npm start`.
 
-Because the app exposes a Pi coding-agent session with filesystem and shell tools, the local evaluation server is bound to loopback by default using `HOST=127.0.0.1`. Use an SSH tunnel to reach it from another machine instead of exposing it directly.
-
-## Commands used
+## Build and run
 
 ```bash
 npm ci --ignore-scripts
 npm run build
-set -a; . /root/.env; set +a
 HOST=127.0.0.1 PORT=3001 npm start
 ```
+
+For LAN-only evaluation, bind explicitly to all interfaces on a trusted network:
+
+```bash
+HOST=0.0.0.0 PORT=3001 npm start
+```
+
+If you want application-layer shared-secret protection, set `PI_WEBUI_TOKEN` and open `/?token=<token>` once. The token is stored in browser local storage for reconnects; see the README security note about query-string exposure.
 
 Health check:
 
@@ -19,7 +24,7 @@ Health check:
 curl -I http://127.0.0.1:3001/
 ```
 
-Model selector smoke check:
+WebSocket smoke check:
 
 ```bash
 node --input-type=module - <<'JS'
@@ -36,17 +41,9 @@ ws.on('message', (data) => {
 JS
 ```
 
-The app vendors B612 regular/bold under `client/fonts/` and applies it globally through `client/app.css` variables.
+## Evaluation notes
 
-The current aiworker evaluation runtime leaves `PI_WEBUI_TOKEN` unset, so direct access works at `http://10.4.2.108:3001/` and the WebSocket relies on Origin checks. To add a shared secret, set `PI_WEBUI_TOKEN` and open `http://10.4.2.108:3001/?token=<token>` once; the browser stores it for reconnects.
-
-The model selector shows scoped/default Pi models first by default. Use the dropdown's `Show all` control to include every available local/openai-codex model.
-
-The sessions sidebar is intentionally limited and cached: `SESSION_LIST_LIMIT` defaults to `50`, and `SESSION_LIST_CACHE_MS` defaults to `10000`. This avoids parsing every historical JSONL file on each sidebar open.
-
-Hugging Face, GitHub Copilot, and Anthropic provider auth were removed from the local Pi config/environment during evaluation; current expected providers are `local` and `openai-codex`.
-
-## Repository remotes
-
-- `origin`: `ssh://git@git.openfu.com:11622/udo/pi-webui.git`
-- `upstream`: `https://github.com/Zetaphor/pi-webui.git`
+- The app vendors B612 regular/bold under `client/fonts/` and applies it globally through `client/app.css` variables.
+- The model selector shows scoped/default Pi models first by default. Use the dropdown's `Show all` control to include every available configured model.
+- The sessions sidebar is intentionally limited and cached: `SESSION_LIST_LIMIT` defaults to `50`, and `SESSION_LIST_CACHE_MS` defaults to `10000`. This avoids parsing every historical JSONL file on each sidebar open.
+- WebSocket `Origin` checks are always enabled. `PI_WEBUI_TOKEN` is optional and adds a shared secret on top of origin checks.

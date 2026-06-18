@@ -21,9 +21,9 @@ The agent session defaults to `os.homedir()`. This is passed as `cwd` to `create
 - `npm run dev` — concurrent dev server (tsx watch + vite)
 - `npm run build` — vite production build to `dist/`
 - `npm start` — run production server (serves `dist/` static files)
-- Local evaluation service: tmux session `pi-webui-eval`, started from `/root/projects/pi-webui`
-- Current aiworker command: `set -a; . /root/.env; set +a; HOST=0.0.0.0 PORT=3001 npm start`
-- Access requires `PI_WEBUI_TOKEN` via `/?token=<token>` once; the client persists it in local storage
+- Local evaluation service, when used here: tmux session `pi-webui-eval`, started from the repository root.
+- Typical local command: `HOST=127.0.0.1 PORT=3001 npm start`; bind `HOST=0.0.0.0` only on a trusted network.
+- `PI_WEBUI_TOKEN` is optional. If set, open `/?token=<token>` once; the client persists it in local storage. If unset, WebSocket access relies on Origin checks.
 
 ## After making changes
 

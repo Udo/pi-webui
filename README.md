@@ -55,13 +55,6 @@ npm run build
 HOST=127.0.0.1 PORT=8085 PI_WEBUI_TOKEN=change-me npm start
 ```
 
-Or use the systemd user service:
-
-```bash
-cp pi-webui.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now pi-webui.service
-```
 
 ## Features
 
