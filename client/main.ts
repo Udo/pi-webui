@@ -68,10 +68,6 @@ function getWsUrl(): string {
 }
 
 function connectWs() {
-  if (!getWebUiToken()) {
-    errorMessage = "Authentication token required. Open this page with ?token=<PI_WEBUI_TOKEN>.";
-  }
-
   ws = new WebSocket(getWsUrl());
 
   ws.onopen = () => {
@@ -433,7 +429,7 @@ function renderSidebar() {
           </div>
         ` : sessionList.length === 0 && (!connected || !agentReady) ? html`
           <div class="sidebar-empty">
-            ${getWebUiToken() ? "Connecting..." : "Authentication token required"}
+            Connecting...
           </div>
         ` : sessionList.length === 0 ? html`
           <div class="sidebar-empty">

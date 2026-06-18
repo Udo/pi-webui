@@ -1,5 +1,5 @@
 import express from "express";
-import { randomBytes, timingSafeEqual } from "crypto";
+import { timingSafeEqual } from "crypto";
 import { createServer } from "http";
 import fs from "fs";
 import os from "os";
@@ -37,9 +37,7 @@ let litellmKey = process.env.LITELLM_KEY || "";
 
 const app = express();
 const server = createServer(app);
-const configuredToken = process.env.PI_WEBUI_TOKEN || "";
-const generatedToken = configuredToken ? "" : randomBytes(24).toString("base64url");
-const webUiToken = configuredToken || generatedToken;
+const webUiToken = process.env.PI_WEBUI_TOKEN || "";
 const allowedOrigins = new Set(
   (process.env.PI_WEBUI_ALLOWED_ORIGINS || "")
     .split(",")
@@ -707,8 +705,10 @@ async function main() {
 
   server.listen(PORT, HOST, () => {
     console.log(`Pi WebUI server listening on http://${HOST}:${PORT}`);
-    if (generatedToken) {
-      console.log(`Generated PI_WEBUI_TOKEN for this process. Open http://${HOST === "0.0.0.0" ? "<host>" : HOST}:${PORT}/?token=${generatedToken}`);
+    if (webUiToken) {
+      console.log("PI_WEBUI_TOKEN is configured; open the UI with ?token=<token> once.");
+    } else {
+      console.warn("PI_WEBUI_TOKEN is not configured; relying on WebSocket Origin checks only.");
     }
   });
 }

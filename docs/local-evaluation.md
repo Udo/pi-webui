@@ -38,7 +38,7 @@ JS
 
 The app vendors B612 regular/bold under `client/fonts/` and applies it globally through `client/app.css` variables.
 
-Access requires the shared secret in `/root/.env` as `PI_WEBUI_TOKEN`. Open `http://10.4.2.108:3001/?token=<token>` once; the browser stores it for WebSocket reconnects.
+The current aiworker evaluation runtime leaves `PI_WEBUI_TOKEN` unset, so direct access works at `http://10.4.2.108:3001/` and the WebSocket relies on Origin checks. To add a shared secret, set `PI_WEBUI_TOKEN` and open `http://10.4.2.108:3001/?token=<token>` once; the browser stores it for reconnects.
 
 The model selector shows scoped/default Pi models first by default. Use the dropdown's `Show all` control to include every available local/openai-codex model.
 
