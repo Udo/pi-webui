@@ -49,9 +49,9 @@ function assistantMetadata(message: any): string {
 }
 
 function installAssistantMetadataRenderer() {
-  // @mariozechner/pi-web-ui 0.66.1 has no trailing-metadata slot/hook for
+  // @mariozechner/pi-web-ui currently has no trailing-metadata slot/hook for
   // assistant messages, so this app overrides the component renderer locally.
-  // Keep package.json pinned to 0.66.1 and re-audit this copy before bumping.
+  // Re-audit this copy after pi-web-ui updates, especially around chunk/tool rendering.
   (AssistantMessage.prototype as any).render = function () {
     const orderedParts = [];
 

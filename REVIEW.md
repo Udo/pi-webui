@@ -23,11 +23,12 @@ Second-pass review after the hardening changes. Typecheck (`tsc --noEmit`) passe
 ### Resolved / mitigated
 
 - **M1 — Monkey-patching `AssistantMessage.prototype.render` is fragile**
-  - Resolution: `@mariozechner/pi-*` UI/runtime dependencies are pinned to the audited `0.66.1`
-    package versions in `package.json`/`package-lock.json`, and `client/main.ts` now carries an
-    explicit comment that the copied renderer must be re-audited before bumping `pi-web-ui`.
-  - Remaining note: this is still a local override because `pi-web-ui` 0.66.1 exposes no trailing
-    assistant-message metadata slot/hook. If upstream adds one, replace the override with that hook.
+  - Resolution: `client/main.ts` now carries an explicit warning that the copied renderer depends on
+    `pi-web-ui` internals and must be re-audited after package updates, especially around chunk/tool
+    rendering.
+  - Remaining note: this is still a local override because `pi-web-ui` exposes no trailing
+    assistant-message metadata slot/hook. The Pi packages are intentionally not pinned because the
+    local Pi agent stack updates frequently; if upstream adds a hook, replace the override with it.
 
 - **M2 — Reconnect/resume spins up a throwaway session every connect**
   - Resolution: the client includes the stored session path in the WebSocket upgrade query, and the
