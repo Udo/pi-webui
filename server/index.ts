@@ -487,7 +487,7 @@ function readAgentSettings(): any {
 async function resolveInitialWebUiModel(): Promise<Model<Api> | undefined> {
   const settings = readAgentSettings();
 
-  // Explicit web UI override, useful for local evaluation without changing Pi's global default.
+  // Explicit web UI override without changing Pi's global default.
   const explicit = getModelFromReference(process.env.PI_WEBUI_MODEL || process.env.PI_MODEL);
   if (explicit) return explicit;
 
