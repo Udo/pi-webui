@@ -447,7 +447,7 @@ function renderApp() {
             return html`
             <div
               id="model-dropdown"
-              class="fixed right-4 mt-1 z-[200] w-64 sm:w-72 max-h-96 flex flex-col rounded-md border border-border bg-popover shadow-lg"
+              class="fixed right-4 mt-1 z-[200] w-[32rem] max-w-[calc(100vw-2rem)] max-h-96 flex flex-col rounded-md border border-border bg-popover shadow-lg"
             >
               <div class="p-1.5 border-b border-border shrink-0">
                 <div class="model-scope-row">
