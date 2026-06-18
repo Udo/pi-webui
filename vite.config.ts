@@ -1,8 +1,26 @@
 import tailwindcss from "@tailwindcss/vite";
-import { defineConfig } from "vite";
+import { createLogger, defineConfig } from "vite";
+
+const logger = createLogger();
+function shouldSuppress(message: string) {
+  return message.includes("fonts/KaTeX_");
+}
+
+const warn = logger.warn;
+logger.warn = (message, options) => {
+  if (shouldSuppress(message)) return;
+  warn(message, options);
+};
+
+const warnOnce = logger.warnOnce;
+logger.warnOnce = (message, options) => {
+  if (shouldSuppress(message)) return;
+  warnOnce(message, options);
+};
 
 export default defineConfig({
   root: ".",
+  customLogger: logger,
   plugins: [tailwindcss()],
   build: {
     outDir: "dist",

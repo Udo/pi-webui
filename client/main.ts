@@ -342,7 +342,6 @@ function closeSidebar() {
 
 function handleLoadSession(sessionPath: string) {
   send({ type: "loadSession", sessionPath });
-  closeSidebar();
 }
 
 document.addEventListener("click", (e) => {
