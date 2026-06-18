@@ -130,7 +130,12 @@ function handleServerMessage(msg: ServerMessage) {
 
     case "sessionChanged":
       currentSessionId = msg.sessionId;
+      if (sidebarOpen) {
+        sessionsLoading = true;
+        send({ type: "getSessions" });
+      }
       renderApp();
+      requestAnimationFrame(() => scrollMessagesToBottom(true));
       break;
   }
 }
@@ -146,6 +151,7 @@ function applyStateSync(state: SerializedAgentState) {
   currentSessionId = state.sessionId;
   currentSessionName = state.sessionName;
   renderApp();
+  requestAnimationFrame(() => scrollMessagesToBottom(!isStreaming));
 }
 
 function handleAgentEvent(event: any) {
@@ -172,6 +178,7 @@ function handleAgentEvent(event: any) {
     case "message_update":
       streamingMessage = event.message;
       updateStreamingContainer(event.message, true);
+      requestAnimationFrame(() => scrollMessagesToBottom(true));
       break;
 
     case "message_end":
@@ -219,6 +226,15 @@ function updateStreamingContainer(message: AgentMessage | null, streaming: boole
   if (container) {
     container.isStreaming = streaming;
     container.setMessage(message, !streaming);
+  }
+}
+
+function scrollMessagesToBottom(force = false) {
+  const scrollEl = document.getElementById("messages-scroll");
+  if (!scrollEl) return;
+  const distanceFromBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+  if (force || distanceFromBottom < 150) {
+    scrollEl.scrollTop = scrollEl.scrollHeight;
   }
 }
 
@@ -564,13 +580,7 @@ function renderApp() {
   render(appHtml, app);
 
   if (isStreaming) {
-    const scrollEl = document.getElementById("messages-scroll");
-    if (scrollEl) {
-      const isNearBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 150;
-      if (isNearBottom) {
-        scrollEl.scrollTop = scrollEl.scrollHeight;
-      }
-    }
+    scrollMessagesToBottom();
   }
 }
 

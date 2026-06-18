@@ -45,11 +45,10 @@ const AGENT_SETTINGS_PATH = path.join(HOME_DIR, ".pi", "agent", "settings.json")
 const SESSION_LIST_LIMIT = parseInt(process.env.SESSION_LIST_LIMIT || "50");
 const SESSION_LIST_CACHE_MS = parseInt(process.env.SESSION_LIST_CACHE_MS || "10000");
 
-let session: AgentSession;
 let authStorage: AuthStorage;
 let modelRegistry: ModelRegistry;
-let sessionUnsubscribe: (() => void) | undefined;
-const clients = new Set<WebSocket>();
+type ClientRuntime = { session: AgentSession; unsubscribe?: () => void };
+const clients = new Map<WebSocket, ClientRuntime>();
 const syntheticModels = new Map<string, Model<Api>>();
 let sessionListCache: { expires: number; items: SessionListItem[] } | undefined;
 
@@ -100,7 +99,7 @@ function buildModelLookupCandidates(provider: string, modelId: string): Array<{ 
   return candidates;
 }
 
-function serializeState(overrides: Partial<Pick<SerializedAgentState, "isStreaming">> & { streamingMessage?: any } = {}): SerializedAgentState {
+function serializeState(session: AgentSession, overrides: Partial<Pick<SerializedAgentState, "isStreaming">> & { streamingMessage?: any } = {}): SerializedAgentState {
   const state = session.agent.state;
   const hasStreamingMessageOverride = Object.prototype.hasOwnProperty.call(overrides, "streamingMessage");
   return {
@@ -115,15 +114,6 @@ function serializeState(overrides: Partial<Pick<SerializedAgentState, "isStreami
     sessionId: session.sessionId,
     sessionName: session.sessionName,
   };
-}
-
-function broadcast(msg: ServerMessage) {
-  const data = JSON.stringify(msg);
-  for (const client of clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(data);
-    }
-  }
 }
 
 function send(ws: WebSocket, msg: ServerMessage) {
@@ -436,12 +426,12 @@ function safeSerializeEvent(event: AgentSessionEvent): any {
   }
 }
 
-function setupSessionEvents() {
-  if (sessionUnsubscribe) sessionUnsubscribe();
+function setupSessionEvents(ws: WebSocket, runtime: ClientRuntime) {
+  if (runtime.unsubscribe) runtime.unsubscribe();
 
-  sessionUnsubscribe = session.subscribe((event: AgentSessionEvent) => {
+  runtime.unsubscribe = runtime.session.subscribe((event: AgentSessionEvent) => {
     const safeEvent = safeSerializeEvent(event);
-    broadcast({ type: "agentEvent", event: safeEvent });
+    send(ws, { type: "agentEvent", event: safeEvent });
 
     if (event.type === "message_end" || event.type === "turn_end") {
       clearSessionListCache();
@@ -454,20 +444,27 @@ function setupSessionEvents() {
       event.type === "turn_end"
     ) {
       const state = event.type === "agent_end"
-        ? serializeState({ isStreaming: false, streamingMessage: null })
-        : serializeState();
-      broadcast({ type: "stateSync", state });
+        ? serializeState(runtime.session, { isStreaming: false, streamingMessage: null })
+        : serializeState(runtime.session);
+      send(ws, { type: "stateSync", state });
     }
   });
 }
 
 async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
+  const runtime = clients.get(ws);
+  if (!runtime) {
+    send(ws, { type: "error", message: "Session is not ready yet" });
+    return;
+  }
+  let session = runtime.session;
+
   try {
     switch (msg.type) {
       case "prompt": {
         session.prompt(msg.text).catch((err: any) => {
           console.error("Prompt error:", err);
-          broadcast({ type: "error", message: err.message || String(err) });
+          send(ws, { type: "error", message: err.message || String(err) });
         });
         break;
       }
@@ -481,7 +478,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
       }
       case "abort": {
         await session.abort();
-        broadcast({ type: "stateSync", state: serializeState() });
+        send(ws, { type: "stateSync", state: serializeState(session) });
         break;
       }
       case "getModels": {
@@ -507,7 +504,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
           return;
         }
         await session.setModel(model);
-        broadcast({
+        send(ws, {
           type: "modelChanged",
           model: modelToInfo(model),
           thinkingLevel: session.thinkingLevel,
@@ -517,7 +514,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
       case "setThinkingLevel": {
         session.setThinkingLevel(msg.level as any);
         const currentModel = session.model ? modelToInfo(session.model) : { provider: "", id: "", name: "" };
-        broadcast({
+        send(ws, {
           type: "modelChanged",
           model: currentModel,
           thinkingLevel: session.thinkingLevel,
@@ -525,21 +522,21 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         break;
       }
       case "getState": {
-        send(ws, { type: "stateSync", state: serializeState() });
+        send(ws, { type: "stateSync", state: serializeState(session) });
         break;
       }
       case "newSession": {
         if (session.isStreaming) {
           await session.abort();
         }
-        if (sessionUnsubscribe) sessionUnsubscribe();
 
         const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR));
-        session = newSession;
+        runtime.session = newSession;
+        session = runtime.session;
         clearSessionListCache();
-        setupSessionEvents();
-        broadcast({ type: "sessionChanged", sessionId: session.sessionId });
-        broadcast({ type: "stateSync", state: serializeState() });
+        setupSessionEvents(ws, runtime);
+        send(ws, { type: "sessionChanged", sessionId: session.sessionId });
+        send(ws, { type: "stateSync", state: serializeState(session) });
         console.log(`New session created: ${session.sessionId}`);
         break;
       }
@@ -552,15 +549,15 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         if (session.isStreaming) {
           await session.abort();
         }
-        if (sessionUnsubscribe) sessionUnsubscribe();
 
         const loadedManager = SessionManager.open(msg.sessionPath, undefined, HOME_DIR);
         const { session: loadedSession } = await createWebUiSession(loadedManager);
-        session = loadedSession;
+        runtime.session = loadedSession;
+        session = runtime.session;
         clearSessionListCache();
-        setupSessionEvents();
-        broadcast({ type: "sessionChanged", sessionId: session.sessionId });
-        broadcast({ type: "stateSync", state: serializeState() });
+        setupSessionEvents(ws, runtime);
+        send(ws, { type: "sessionChanged", sessionId: session.sessionId });
+        send(ws, { type: "stateSync", state: serializeState(session) });
         console.log(`Loaded session: ${session.sessionId}`);
         break;
       }
@@ -582,26 +579,29 @@ async function main() {
     if (key) litellmKey = key;
   }
 
-  const { session: agentSession, modelFallbackMessage } = await createWebUiSession(SessionManager.create(HOME_DIR));
+  wss.on("connection", async (ws) => {
+    console.log(`Client connected (${clients.size + 1} total)`);
 
-  session = agentSession;
+    try {
+      const { session, modelFallbackMessage } = await createWebUiSession(SessionManager.create(HOME_DIR));
+      const runtime: ClientRuntime = { session };
+      clients.set(ws, runtime);
 
-  if (modelFallbackMessage) {
-    console.log("Model fallback:", modelFallbackMessage);
-  }
+      if (modelFallbackMessage) {
+        console.log("Model fallback:", modelFallbackMessage);
+      }
 
-  console.log(`Model: ${session.model?.provider}/${session.model?.id}`);
-  console.log(`Thinking: ${session.thinkingLevel}`);
-  console.log(`Tools: ${session.getActiveToolNames().join(", ")}`);
+      console.log(`Client session ${session.sessionId}: ${session.model?.provider}/${session.model?.id}, thinking ${session.thinkingLevel}, tools ${session.getActiveToolNames().join(", ")}`);
+      setupSessionEvents(ws, runtime);
 
-  setupSessionEvents();
-
-  wss.on("connection", (ws) => {
-    clients.add(ws);
-    console.log(`Client connected (${clients.size} total)`);
-
-    send(ws, { type: "ready" });
-    send(ws, { type: "stateSync", state: serializeState() });
+      send(ws, { type: "ready" });
+      send(ws, { type: "stateSync", state: serializeState(session) });
+    } catch (err: any) {
+      console.error("Failed to create client session:", err);
+      send(ws, { type: "error", message: err.message || String(err) });
+      ws.close();
+      return;
+    }
 
     ws.on("message", (data) => {
       try {
@@ -613,6 +613,8 @@ async function main() {
     });
 
     ws.on("close", () => {
+      const runtime = clients.get(ws);
+      if (runtime?.unsubscribe) runtime.unsubscribe();
       clients.delete(ws);
       console.log(`Client disconnected (${clients.size} total)`);
     });
