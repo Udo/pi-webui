@@ -54,4 +54,5 @@ export interface SerializedAgentState {
   tools: string[];
   sessionId: string;
   sessionName?: string;
+  sessionPath?: string;
 }

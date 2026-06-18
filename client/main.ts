@@ -42,15 +42,28 @@ let showAllModels = false;
 let toolNames: string[] = [];
 let currentSessionId = "";
 let currentSessionName: string | undefined;
+let currentSessionPath: string | undefined;
+let errorClearTimer: number | undefined;
 let sidebarOpen = false;
 let sessionList: SessionListItem[] = [];
 let sessionsLoading = false;
 
 // ── WebSocket ──
 
+function getWebUiToken(): string {
+  const params = new URLSearchParams(location.search);
+  const token = params.get("token") || localStorage.getItem("pi-webui-token") || "";
+  if (token) {
+    localStorage.setItem("pi-webui-token", token);
+  }
+  return token;
+}
+
 function getWsUrl(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/api/ws`;
+  const token = getWebUiToken();
+  const query = token ? `?token=${encodeURIComponent(token)}` : "";
+  return `${proto}//${location.host}/api/ws${query}`;
 }
 
 function connectWs() {
@@ -58,8 +71,6 @@ function connectWs() {
 
   ws.onopen = () => {
     connected = true;
-    send({ type: "getModels" });
-    send({ type: "getState" });
     renderApp();
   };
 
@@ -75,8 +86,14 @@ function connectWs() {
   };
 
   ws.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data) as ServerMessage;
-    handleServerMessage(msg);
+    try {
+      const msg = JSON.parse(ev.data) as ServerMessage;
+      handleServerMessage(msg);
+    } catch (err) {
+      console.error("Invalid server message:", err);
+      errorMessage = "Invalid server message";
+      renderApp();
+    }
   };
 }
 
@@ -88,8 +105,16 @@ function send(msg: ClientMessage) {
 
 function handleServerMessage(msg: ServerMessage) {
   switch (msg.type) {
-    case "ready":
+    case "ready": {
+      send({ type: "getModels" });
+      const lastPath = localStorage.getItem("pi-webui-session-path");
+      if (lastPath) {
+        send({ type: "loadSession", sessionPath: lastPath });
+      } else {
+        send({ type: "getState" });
+      }
       break;
+    }
 
     case "stateSync":
       applyStateSync(msg.state);
@@ -114,9 +139,11 @@ function handleServerMessage(msg: ServerMessage) {
 
     case "error":
       errorMessage = msg.message;
+      if (errorClearTimer) window.clearTimeout(errorClearTimer);
       renderApp();
-      setTimeout(() => {
+      errorClearTimer = window.setTimeout(() => {
         errorMessage = undefined;
+        errorClearTimer = undefined;
         renderApp();
       }, 5000);
       break;
@@ -150,6 +177,10 @@ function applyStateSync(state: SerializedAgentState) {
   if (state.errorMessage) errorMessage = state.errorMessage;
   currentSessionId = state.sessionId;
   currentSessionName = state.sessionName;
+  currentSessionPath = state.sessionPath;
+  if (currentSessionPath) {
+    localStorage.setItem("pi-webui-session-path", currentSessionPath);
+  }
   renderApp();
   requestAnimationFrame(() => scrollMessagesToBottom(!isStreaming));
 }

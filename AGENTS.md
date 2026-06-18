@@ -21,18 +21,19 @@ The agent session defaults to `os.homedir()`. This is passed as `cwd` to `create
 - `npm run dev` — concurrent dev server (tsx watch + vite)
 - `npm run build` — vite production build to `dist/`
 - `npm start` — run production server (serves `dist/` static files)
-- Systemd service: `systemctl --user restart pi-webui`
-- Deployed at `pi.zetaphor.space` via Caddy reverse proxy on port 8085
+- Local evaluation service: tmux session `pi-webui-eval`, started from `/root/projects/pi-webui`
+- Current aiworker command: `set -a; . /root/.env; set +a; HOST=0.0.0.0 PORT=3001 npm start`
+- Access requires `PI_WEBUI_TOKEN` via `/?token=<token>` once; the client persists it in local storage
 
 ## After making changes
 
-1. Run `npx vite build` to rebuild the client
-2. Run `systemctl --user restart pi-webui.service` to pick up server changes
+1. Run `npm run build` to rebuild the client
+2. Restart the `pi-webui-eval` tmux session to pick up server changes
 3. Both steps are needed — the production server serves the built `dist/` output
 
 ## File layout
 
-- `server/index.ts` — the entire backend (Express, WebSocket, Pi SDK session, LiteLLM integration, session management)
+- `server/index.ts` — the entire backend (Express, authenticated/origin-checked WebSocket, per-client Pi SDK sessions, optional LiteLLM integration, session management)
 - `client/main.ts` — the entire frontend (WebSocket client, state management, all UI rendering)
 - `client/app.css` — theme overrides (green accent), sidebar CSS, session item styles
 - `shared/protocol.ts` — all WebSocket message types shared between client and server
@@ -44,3 +45,4 @@ The agent session defaults to `os.homedir()`. This is passed as `cwd` to `create
 - `AgentSessionEvent` objects may contain circular references — the server uses `safeSerializeEvent()` to handle this before sending over WebSocket.
 - Express 5 uses `path-to-regexp` v8 which requires `/{*path}` syntax for catch-all routes, not `*`.
 - The model dropdown uses `position: fixed` with `z-index: 200` to escape all stacking contexts.
+- Do not run live debug WebSocket clients that send `newSession` against a user's browser session without warning; sessions are now per-WebSocket, but live eval still has user-visible process restarts.

@@ -1,4 +1,5 @@
 import express from "express";
+import { randomBytes, timingSafeEqual } from "crypto";
 import { createServer } from "http";
 import fs from "fs";
 import os from "os";
@@ -23,15 +24,59 @@ import type {
 } from "../shared/protocol.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = parseInt(process.env.PORT || "3001");
+function parseIntEnv(name: string, fallback: number): number {
+  const value = Number.parseInt(process.env[name] || "", 10);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+const PORT = parseIntEnv("PORT", 3001);
 const HOST = process.env.HOST || "127.0.0.1";
 const LITELLM_URL = process.env.LITELLM_URL || "";
-const LITELLM_TIMEOUT_MS = parseInt(process.env.LITELLM_TIMEOUT_MS || "1500");
+const LITELLM_TIMEOUT_MS = parseIntEnv("LITELLM_TIMEOUT_MS", 1500);
 let litellmKey = process.env.LITELLM_KEY || "";
 
 const app = express();
 const server = createServer(app);
-const wss = new WebSocketServer({ server, path: "/api/ws" });
+const configuredToken = process.env.PI_WEBUI_TOKEN || "";
+const generatedToken = configuredToken ? "" : randomBytes(24).toString("base64url");
+const webUiToken = configuredToken || generatedToken;
+const allowedOrigins = new Set(
+  (process.env.PI_WEBUI_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+);
+
+function isAllowedWsOrigin(origin: string | undefined, hostHeader: string | undefined): boolean {
+  if (!origin) return true;
+  if (allowedOrigins.has(origin)) return true;
+  try {
+    const url = new URL(origin);
+    return Boolean(hostHeader) && url.host === hostHeader;
+  } catch {
+    return false;
+  }
+}
+
+function isValidToken(candidate: string | undefined): boolean {
+  if (!webUiToken) return true;
+  if (!candidate) return false;
+  const expected = Buffer.from(webUiToken);
+  const actual = Buffer.from(candidate);
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+const wss = new WebSocketServer({
+  server,
+  path: "/api/ws",
+  maxPayload: 1024 * 1024,
+  verifyClient: (info, done) => {
+    const originOk = isAllowedWsOrigin(info.origin, info.req.headers.host);
+    const token = new URL(info.req.url || "/", "http://localhost").searchParams.get("token") || undefined;
+    const tokenOk = isValidToken(token);
+    done(originOk && tokenOk, originOk ? 401 : 403, originOk ? "Unauthorized" : "Forbidden");
+  },
+});
 
 // Serve static client files in production
 const clientDist = path.resolve(__dirname, "../dist");
@@ -42,8 +87,8 @@ app.get("/{*path}", (_req, res) => {
 
 const HOME_DIR = os.homedir();
 const AGENT_SETTINGS_PATH = path.join(HOME_DIR, ".pi", "agent", "settings.json");
-const SESSION_LIST_LIMIT = parseInt(process.env.SESSION_LIST_LIMIT || "50");
-const SESSION_LIST_CACHE_MS = parseInt(process.env.SESSION_LIST_CACHE_MS || "10000");
+const SESSION_LIST_LIMIT = parseIntEnv("SESSION_LIST_LIMIT", 50);
+const SESSION_LIST_CACHE_MS = parseIntEnv("SESSION_LIST_CACHE_MS", 10000);
 
 let authStorage: AuthStorage;
 let modelRegistry: ModelRegistry;
@@ -113,6 +158,7 @@ function serializeState(session: AgentSession, overrides: Partial<Pick<Serialize
     tools: session.getActiveToolNames(),
     sessionId: session.sessionId,
     sessionName: session.sessionName,
+    sessionPath: session.sessionFile,
   };
 }
 
@@ -451,6 +497,30 @@ function setupSessionEvents(ws: WebSocket, runtime: ClientRuntime) {
   });
 }
 
+function isClientMessage(value: any): value is ClientMessage {
+  if (!value || typeof value.type !== "string") return false;
+  switch (value.type) {
+    case "prompt":
+    case "steer":
+    case "followUp":
+      return typeof value.text === "string" && value.text.length <= 100_000;
+    case "setModel":
+      return typeof value.provider === "string" && typeof value.modelId === "string";
+    case "setThinkingLevel":
+      return typeof value.level === "string";
+    case "loadSession":
+      return typeof value.sessionPath === "string";
+    case "abort":
+    case "getModels":
+    case "getState":
+    case "newSession":
+    case "getSessions":
+      return true;
+    default:
+      return false;
+  }
+}
+
 async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
   const runtime = clients.get(ws);
   if (!runtime) {
@@ -550,7 +620,14 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
           await session.abort();
         }
 
-        const loadedManager = SessionManager.open(msg.sessionPath, undefined, HOME_DIR);
+        const sessionDir = path.resolve(getSessionDir(HOME_DIR));
+        const requestedPath = path.resolve(msg.sessionPath);
+        if (!requestedPath.startsWith(`${sessionDir}${path.sep}`)) {
+          send(ws, { type: "error", message: "Refusing to load session outside the configured session directory" });
+          return;
+        }
+
+        const loadedManager = SessionManager.open(requestedPath, undefined, HOME_DIR);
         const { session: loadedSession } = await createWebUiSession(loadedManager);
         runtime.session = loadedSession;
         session = runtime.session;
@@ -605,16 +682,24 @@ async function main() {
 
     ws.on("message", (data) => {
       try {
-        const msg = JSON.parse(data.toString()) as ClientMessage;
-        handleClientMessage(ws, msg);
+        const parsed = JSON.parse(data.toString());
+        if (!isClientMessage(parsed)) {
+          send(ws, { type: "error", message: "Invalid client message" });
+          return;
+        }
+        handleClientMessage(ws, parsed);
       } catch (err) {
         console.error("Invalid message:", err);
+        send(ws, { type: "error", message: "Invalid JSON message" });
       }
     });
 
     ws.on("close", () => {
       const runtime = clients.get(ws);
       if (runtime?.unsubscribe) runtime.unsubscribe();
+      if (runtime?.session.isStreaming) {
+        runtime.session.abort().catch((err: any) => console.error("Abort on disconnect failed:", err));
+      }
       clients.delete(ws);
       console.log(`Client disconnected (${clients.size} total)`);
     });
@@ -622,6 +707,9 @@ async function main() {
 
   server.listen(PORT, HOST, () => {
     console.log(`Pi WebUI server listening on http://${HOST}:${PORT}`);
+    if (generatedToken) {
+      console.log(`Generated PI_WEBUI_TOKEN for this process. Open http://${HOST === "0.0.0.0" ? "<host>" : HOST}:${PORT}/?token=${generatedToken}`);
+    }
   });
 }
 

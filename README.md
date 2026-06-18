@@ -16,7 +16,7 @@ Node.js server (Express + ws)
 System tools (bash, files, skills, extensions)
 ```
 
-- **Server** (`server/index.ts`): Runs the Pi SDK `AgentSession` with full system access. Loads auth and model config from `~/.pi/agent`. Streams agent events to connected clients over WebSocket. Fetches models from a local LiteLLM instance.
+- **Server** (`server/index.ts`): Runs one Pi SDK `AgentSession` per WebSocket client with full system access. Loads auth and model config from `~/.pi/agent`. Streams each client's agent events only to that client. Model discovery comes from the Pi model registry, with optional LiteLLM augmentation.
 - **Client** (`client/main.ts`): Lit-based UI using `@mariozechner/pi-web-ui` components (`MessageList`, `MessageEditor`, `StreamingMessageContainer`). Communicates exclusively via WebSocket.
 - **Protocol** (`shared/protocol.ts`): Typed JSON message definitions for the WebSocket wire format.
 
@@ -32,8 +32,12 @@ npm run build
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `3001` | Server listen port |
-| `HOST` | `127.0.0.1` | Server listen address. Use `0.0.0.0` only on a trusted network or behind authentication. |
-| `LITELLM_URL` | `http://192.168.50.240:4000` | LiteLLM API base URL |
+| `HOST` | `127.0.0.1` | Server listen address. Use `0.0.0.0` only on a trusted network and with `PI_WEBUI_TOKEN` set. |
+| `PI_WEBUI_TOKEN` | *(generated per process if unset)* | Shared secret required by `/api/ws`. Open `/?token=<token>` once; the client stores it in local storage for reconnects. |
+| `PI_WEBUI_ALLOWED_ORIGINS` | same host as request | Optional comma-separated extra WebSocket `Origin` allowlist. |
+| `SESSION_LIST_LIMIT` | `50` | Maximum recent sessions parsed for the sidebar. |
+| `SESSION_LIST_CACHE_MS` | `10000` | Sessions sidebar cache TTL. |
+| `LITELLM_URL` | *(empty)* | Optional LiteLLM API base URL for extra model listing. |
 | `LITELLM_KEY` | *(from ~/.pi/agent)* | LiteLLM API key (auto-detected from Pi config if unset) |
 
 ### Development
@@ -48,7 +52,7 @@ Starts the server (`tsx watch`) on port 3001 and Vite dev server on port 5173 wi
 
 ```bash
 npm run build
-HOST=127.0.0.1 PORT=8085 npm start
+HOST=127.0.0.1 PORT=8085 PI_WEBUI_TOKEN=change-me npm start
 ```
 
 Or use the systemd user service:
@@ -62,13 +66,12 @@ systemctl --user enable --now pi-webui.service
 ## Features
 
 - Full Pi agent with system access (bash, read, edit, write, extensions)
-- Session persistence and history — create new sessions, browse and resume previous ones
-- Model switching with sorted, filterable dropdown (pulls from LiteLLM + Pi model registry)
+- Per-browser-client session isolation with persistence and history — create new sessions, browse and resume previous ones
+- Model switching with scoped/default models first and an optional full model list (Pi model registry plus optional LiteLLM)
 - Configurable thinking level (off, minimal, low, medium, high)
 - Streaming responses with tool execution display
 - Collapsible session sidebar (inline on desktop, overlay on mobile)
 - Dark/light theme toggle with green accent
-- Deployed at `pi.zetaphor.space` via Caddy + Tailscale
 
 ## Project structure
 
