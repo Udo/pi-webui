@@ -37,6 +37,10 @@ JS
 
 The app vendors B612 regular/bold under `client/fonts/` and applies it globally through `client/app.css` variables.
 
+The model selector shows scoped/default Pi models first by default. Use the dropdown's `Show all` control to include every available local/openai-codex model.
+
+Hugging Face, GitHub Copilot, and Anthropic provider auth were removed from the local Pi config/environment during evaluation; current expected providers are `local` and `openai-codex`.
+
 ## Repository remotes
 
 - `origin`: `ssh://git@git.openfu.com:11622/udo/pi-webui.git`

@@ -78,6 +78,9 @@ textarea {
 .model-button,
 .model-filter,
 .model-option,
+.model-scope-row,
+.model-scope-toggle,
+.model-scope-tag,
 .status-pill,
 .tool-count,
 .empty-state,
@@ -225,6 +228,33 @@ textarea {
 
 .model-option-current {
   background: color-mix(in oklab, var(--accent) 50%, transparent);
+}
+
+.model-scope-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-2);
+  margin-bottom: var(--app-space-2);
+  color: var(--muted-foreground);
+}
+
+.model-scope-toggle {
+  border: 1px solid var(--border);
+  border-radius: var(--app-radius);
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  padding: 2px 8px;
+}
+
+.model-scope-toggle:hover {
+  background: var(--accent);
+}
+
+.model-scope-tag {
+  color: var(--muted-foreground);
+  margin-left: var(--app-space-2);
 }
 
 @media (max-width: 767px) {

@@ -50,11 +50,12 @@ let sessionUnsubscribe: (() => void) | undefined;
 const clients = new Set<WebSocket>();
 const syntheticModels = new Map<string, Model<Api>>();
 
-function modelToInfo(model: Model<Api>): ModelInfo {
+function modelToInfo(model: Model<Api>, scoped = false): ModelInfo {
   return {
     provider: model.provider,
     id: model.id,
     name: model.name || model.id,
+    scoped,
   };
 }
 
@@ -199,11 +200,17 @@ function findConfiguredOrSyntheticModel(provider: string, modelId: string): Mode
   return synthetic && modelRegistry.hasConfiguredAuth(synthetic) ? synthetic : undefined;
 }
 
-function addModelInfo(merged: ModelInfo[], seen: Set<string>, model: Model<Api>) {
+function addModelInfo(merged: ModelInfo[], seen: Set<string>, model: Model<Api>, scoped = false) {
   const key = modelKey(model.provider, model.id);
-  if (seen.has(key)) return;
+  if (seen.has(key)) {
+    if (scoped) {
+      const existing = merged.find((m) => modelKey(m.provider, m.id) === key);
+      if (existing) existing.scoped = true;
+    }
+    return;
+  }
   seen.add(key);
-  merged.push(modelToInfo(model));
+  merged.push(modelToInfo(model, scoped));
 }
 
 async function getRegistryModels(): Promise<ModelInfo[]> {
@@ -214,17 +221,19 @@ async function getRegistryModels(): Promise<ModelInfo[]> {
   const merged: ModelInfo[] = [];
   const seen = new Set<string>();
 
-  for (const reference of [
+  const scopedReferences = [
     process.env.PI_WEBUI_MODEL,
     process.env.PI_MODEL,
     settings.defaultProvider && settings.defaultModel ? `${settings.defaultProvider}/${settings.defaultModel}` : undefined,
     ...(Array.isArray(settings.enabledModels) ? settings.enabledModels : []),
-  ]) {
+  ];
+
+  for (const reference of scopedReferences) {
     if (typeof reference !== "string") continue;
     const parsed = parseModelReference(reference);
     if (!parsed) continue;
     const model = findConfiguredOrSyntheticModel(parsed.provider, parsed.modelId);
-    if (model) addModelInfo(merged, seen, model);
+    if (model) addModelInfo(merged, seen, model, true);
   }
 
   for (const model of source) {

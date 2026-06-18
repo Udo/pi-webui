@@ -19,6 +19,7 @@ export interface ModelInfo {
   provider: string;
   id: string;
   name: string;
+  scoped?: boolean;
 }
 
 export interface SessionListItem {

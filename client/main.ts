@@ -38,6 +38,7 @@ let availableModels: ModelInfo[] = [];
 let errorMessage: string | undefined;
 let showModelDropdown = false;
 let modelFilter = "";
+let showAllModels = false;
 let toolNames: string[] = [];
 let currentSessionId = "";
 let currentSessionName: string | undefined;
@@ -251,6 +252,7 @@ function handleThinkingChange(level: string) {
 function toggleModelDropdown() {
   showModelDropdown = !showModelDropdown;
   modelFilter = "";
+  showAllModels = false;
   renderApp();
   if (showModelDropdown) {
     requestAnimationFrame(() => {
@@ -438,7 +440,9 @@ function renderApp() {
             ${icon(ChevronDown, "xs")}
           </button>
           ${showModelDropdown ? (() => {
-            const sorted = [...availableModels].sort((a, b) => modelLabel(a).localeCompare(modelLabel(b)));
+            const scopedModels = availableModels.filter((m) => m.scoped);
+            const sourceModels = showAllModels || scopedModels.length === 0 ? availableModels : scopedModels;
+            const sorted = [...sourceModels].sort((a, b) => modelLabel(a).localeCompare(modelLabel(b)));
             const filtered = sorted.filter((m) => modelMatchesFilter(m, modelFilter));
             return html`
             <div
@@ -446,6 +450,17 @@ function renderApp() {
               class="fixed right-4 mt-1 z-[200] w-64 sm:w-72 max-h-96 flex flex-col rounded-md border border-border bg-popover shadow-lg"
             >
               <div class="p-1.5 border-b border-border shrink-0">
+                <div class="model-scope-row">
+                  <span>${showAllModels || scopedModels.length === 0 ? `All models (${availableModels.length})` : `Scoped models (${scopedModels.length})`}</span>
+                  ${scopedModels.length > 0 ? html`
+                    <button
+                      class="model-scope-toggle"
+                      @click=${() => { showAllModels = !showAllModels; renderApp(); }}
+                    >
+                      ${showAllModels ? "Show scoped" : "Show all"}
+                    </button>
+                  ` : nothing}
+                </div>
                 <input
                   id="model-filter"
                   type="text"
@@ -463,7 +478,7 @@ function renderApp() {
                       class="model-option w-full text-left px-3 py-2 hover:bg-accent transition-colors ${m.provider === currentModel?.provider && m.id === currentModel?.id ? 'model-option-current' : ''}"
                       @click=${() => handleModelSelect(m)}
                     >
-                      ${modelLabel(m)}
+                      ${modelLabel(m)}${m.scoped ? html` <span class="model-scope-tag">scoped</span>` : nothing}
                     </button>
                   `
                 )}
