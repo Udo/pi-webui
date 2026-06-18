@@ -3,7 +3,7 @@ import "./app.css";
 
 import { html, render, nothing } from "lit";
 import { icon } from "@mariozechner/mini-lit";
-import { ChevronDown, Plus, History, X, PanelLeftClose, Menu } from "lucide";
+import { ChevronDown, Plus, PanelLeftClose, Menu } from "lucide";
 
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
@@ -49,6 +49,9 @@ function assistantMetadata(message: any): string {
 }
 
 function installAssistantMetadataRenderer() {
+  // @mariozechner/pi-web-ui 0.66.1 has no trailing-metadata slot/hook for
+  // assistant messages, so this app overrides the component renderer locally.
+  // Keep package.json pinned to 0.66.1 and re-audit this copy before bumping.
   (AssistantMessage.prototype as any).render = function () {
     const orderedParts = [];
 
@@ -130,7 +133,11 @@ function getWebUiToken(): string {
 function getWsUrl(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const token = getWebUiToken();
-  const query = token ? `?token=${encodeURIComponent(token)}` : "";
+  const lastPath = localStorage.getItem("pi-webui-session-path") || "";
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  if (lastPath) params.set("sessionPath", lastPath);
+  const query = params.toString() ? `?${params.toString()}` : "";
   return `${proto}//${location.host}/api/ws${query}`;
 }
 
@@ -180,12 +187,6 @@ function handleServerMessage(msg: ServerMessage) {
       agentReady = true;
       send({ type: "getModels" });
       send({ type: "getSessions" });
-      const lastPath = localStorage.getItem("pi-webui-session-path");
-      if (lastPath) {
-        send({ type: "loadSession", sessionPath: lastPath });
-      } else {
-        send({ type: "getState" });
-      }
       if (sidebarOpen) {
         sessionsLoading = true;
       }

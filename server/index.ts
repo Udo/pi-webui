@@ -142,8 +142,22 @@ function buildModelLookupCandidates(provider: string, modelId: string): Array<{ 
   return candidates;
 }
 
-function serializeMessages(session: AgentSession): any[] {
-  const messages = session.agent.state.messages;
+type MessageCompletionCache = {
+  leafId: string | null;
+  messageCount: number;
+  completedAtByKey: Map<string, number[]>;
+};
+
+const messageCompletionCache = new WeakMap<AgentSession, MessageCompletionCache>();
+
+function getMessageCompletionTimes(session: AgentSession): Map<string, number[]> {
+  const leafId = session.sessionManager.getLeafId();
+  const messageCount = session.agent.state.messages.length;
+  const cached = messageCompletionCache.get(session);
+  if (cached && cached.leafId === leafId && cached.messageCount === messageCount) {
+    return new Map([...cached.completedAtByKey].map(([key, values]) => [key, [...values]]));
+  }
+
   const completedAtByKey = new Map<string, number[]>();
   for (const entry of session.sessionManager.getBranch()) {
     if (entry.type !== "message") continue;
@@ -156,6 +170,17 @@ function serializeMessages(session: AgentSession): any[] {
     completedAtByKey.set(key, queue);
   }
 
+  messageCompletionCache.set(session, {
+    leafId,
+    messageCount,
+    completedAtByKey: new Map([...completedAtByKey].map(([key, values]) => [key, [...values]])),
+  });
+  return completedAtByKey;
+}
+
+function serializeMessages(session: AgentSession): any[] {
+  const messages = session.agent.state.messages;
+  const completedAtByKey = getMessageCompletionTimes(session);
   return messages.map((message: any) => {
     const key = `${message.role}:${message.timestamp ?? ""}`;
     const completedAt = completedAtByKey.get(key)?.shift();
@@ -287,6 +312,27 @@ async function listRecentSessions(): Promise<SessionListItem[]> {
 
 function clearSessionListCache() {
   sessionListCache = undefined;
+}
+
+function resolveSessionPath(candidate: string): string | undefined {
+  const sessionDir = path.resolve(getSessionDir(HOME_DIR));
+  const requestedPath = path.resolve(candidate);
+  if (!requestedPath.startsWith(`${sessionDir}${path.sep}`)) return undefined;
+  return requestedPath;
+}
+
+function sessionManagerForResumePath(candidate: string | undefined): SessionManager {
+  if (!candidate) return SessionManager.create(HOME_DIR);
+  const requestedPath = resolveSessionPath(candidate);
+  if (!requestedPath) {
+    console.warn("Ignoring resume path outside configured session directory");
+    return SessionManager.create(HOME_DIR);
+  }
+  if (!fs.existsSync(requestedPath)) {
+    console.warn("Ignoring missing resume session path");
+    return SessionManager.create(HOME_DIR);
+  }
+  return SessionManager.open(requestedPath, undefined, HOME_DIR);
 }
 
 async function fetchLiteLLMModels(): Promise<ModelInfo[]> {
@@ -640,9 +686,8 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
           await session.abort();
         }
 
-        const sessionDir = path.resolve(getSessionDir(HOME_DIR));
-        const requestedPath = path.resolve(msg.sessionPath);
-        if (!requestedPath.startsWith(`${sessionDir}${path.sep}`)) {
+        const requestedPath = resolveSessionPath(msg.sessionPath);
+        if (!requestedPath) {
           send(ws, { type: "error", message: "Refusing to load session outside the configured session directory" });
           return;
         }
@@ -676,11 +721,13 @@ async function main() {
     if (key) litellmKey = key;
   }
 
-  wss.on("connection", async (ws) => {
+  wss.on("connection", async (ws, request) => {
     console.log(`Client connected (${clients.size + 1} total)`);
 
     try {
-      const { session, modelFallbackMessage } = await createWebUiSession(SessionManager.create(HOME_DIR));
+      const url = new URL(request.url || "/api/ws", `http://${request.headers.host || "localhost"}`);
+      const sessionManager = sessionManagerForResumePath(url.searchParams.get("sessionPath") || undefined);
+      const { session, modelFallbackMessage } = await createWebUiSession(sessionManager);
       const runtime: ClientRuntime = { session };
       clients.set(ws, runtime);
 
