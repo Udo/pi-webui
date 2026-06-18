@@ -40,6 +40,7 @@ function formatTokensPerSecond(message: any): string | undefined {
 
 function assistantMetadata(message: any): string {
   const parts = [];
+  if (message.provider && message.model) parts.push(`${message.provider}/${message.model}`);
   if (message.usage) parts.push(formatUsage(message.usage));
   if (message.timestamp) parts.push(formatRelativeTime(new Date(message.timestamp).toISOString()));
   const tokensPerSecond = formatTokensPerSecond(message);
