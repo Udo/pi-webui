@@ -35,7 +35,10 @@ npm run build
 | `HOST` | `127.0.0.1` | Server listen address. Use `0.0.0.0` only on a trusted network and with `PI_WEBUI_TOKEN` set. |
 | `PI_WEBUI_TOKEN` | *(unset)* | Optional shared secret for `/api/ws`. If set, open `/?token=<token>` once; the client stores it in local storage for reconnects. Query-string tokens can appear in browser/proxy logs and are readable by page JavaScript, so use only on trusted local networks. If unset, access relies on WebSocket Origin checks. |
 | `PI_WEBUI_ALLOWED_ORIGINS` | same host as request | Optional comma-separated extra WebSocket `Origin` allowlist. |
-| `SESSION_LIST_LIMIT` | `50` | Maximum recent sessions parsed for the sidebar. |
+| `SESSION_LIST_LIMIT` | `30` | Default sessions fetched per sidebar page. |
+| `SESSION_LIST_MAX_LIMIT` | `100` | Maximum sessions accepted per sidebar page request. |
+| `MESSAGE_PAGE_LIMIT` | `60` | Default newest messages sent for an opened conversation. |
+| `MESSAGE_PAGE_MAX_LIMIT` | `200` | Maximum messages accepted per conversation page request. |
 | `SESSION_LIST_CACHE_MS` | `10000` | Sessions sidebar cache TTL. |
 | `LITELLM_URL` | *(empty)* | Optional LiteLLM API base URL for extra model listing. |
 | `LITELLM_KEY` | *(from ~/.pi/agent)* | LiteLLM API key (auto-detected from Pi config if unset) |
@@ -59,10 +62,10 @@ HOST=127.0.0.1 PORT=8085 PI_WEBUI_TOKEN=change-me npm start
 ## Features
 
 - Full Pi agent with system access (bash, read, edit, write, extensions)
-- Per-browser-client session isolation with persistence and history — create new sessions, browse and resume previous ones
+- Per-browser-client session isolation with persistence and history — create new sessions, search conversations, and browse/resume previous sessions with paged loading
 - Model switching with scoped/default models first and an optional full model list (Pi model registry plus optional LiteLLM)
 - Configurable thinking level (off, minimal, low, medium, high)
-- Streaming responses with tool execution display
+- Streaming responses with tool execution display and paged conversation loading for long histories
 - Collapsible session sidebar (inline on desktop, overlay on mobile)
 - Dark/light theme toggle with green accent
 

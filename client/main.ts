@@ -101,6 +101,10 @@ let ws: WebSocket | null = null;
 let connected = false;
 let agentReady = false;
 let messages: AgentMessage[] = [];
+let messagesOffset = 0;
+let messagesTotal = 0;
+let hasMoreMessagesBefore = false;
+let messagesLoadingOlder = false;
 let isStreaming = false;
 let streamingMessage: AgentMessage | null = null;
 let currentModel: ModelInfo | undefined;
@@ -118,6 +122,11 @@ let errorClearTimer: number | undefined;
 let sidebarOpen = false;
 let sessionList: SessionListItem[] = [];
 let sessionsLoading = false;
+let sessionsLoadingMore = false;
+let sessionsHasMore = false;
+let sessionsOffset = 0;
+let sessionSearch = "";
+let sessionSearchTimer: number | undefined;
 
 // ── WebSocket ──
 
@@ -186,9 +195,8 @@ function handleServerMessage(msg: ServerMessage) {
     case "ready": {
       agentReady = true;
       send({ type: "getModels" });
-      send({ type: "getSessions" });
       if (sidebarOpen) {
-        sessionsLoading = true;
+        requestSessions(true);
       }
       renderApp();
       break;
@@ -228,11 +236,31 @@ function handleServerMessage(msg: ServerMessage) {
       break;
 
     case "sessions":
-      sessionList = msg.sessions;
+      sessionList = (msg.offset || 0) > 0 ? [...sessionList, ...msg.sessions] : msg.sessions;
       currentSessionId = msg.currentSessionId;
+      sessionsOffset = (msg.offset || 0) + msg.sessions.length;
+      sessionsHasMore = Boolean(msg.hasMore);
       sessionsLoading = false;
+      sessionsLoadingMore = false;
+      if (typeof msg.query === "string" && msg.query !== sessionSearch) sessionSearch = msg.query;
       renderApp();
       break;
+
+    case "messagePage": {
+      const scrollEl = document.getElementById("messages-scroll");
+      const previousHeight = scrollEl?.scrollHeight || 0;
+      messages = [...msg.messages, ...messages];
+      messagesOffset = msg.offset;
+      messagesTotal = msg.total;
+      hasMoreMessagesBefore = msg.hasMoreBefore;
+      messagesLoadingOlder = false;
+      renderApp();
+      requestAnimationFrame(() => {
+        const nextScrollEl = document.getElementById("messages-scroll");
+        if (nextScrollEl) nextScrollEl.scrollTop = nextScrollEl.scrollHeight - previousHeight;
+      });
+      break;
+    }
 
     case "sessionChanged":
       currentSessionId = msg.sessionId;
@@ -243,7 +271,17 @@ function handleServerMessage(msg: ServerMessage) {
 }
 
 function applyStateSync(state: SerializedAgentState) {
-  messages = state.messages;
+  const incomingOffset = state.messagesOffset || 0;
+  if (currentSessionId === state.sessionId && messagesOffset < incomingOffset && messages.length > 0) {
+    const prefixCount = Math.max(0, incomingOffset - messagesOffset);
+    messages = [...messages.slice(0, prefixCount), ...state.messages];
+  } else {
+    messages = state.messages;
+    messagesOffset = incomingOffset;
+  }
+  messagesTotal = state.messagesTotal ?? messages.length;
+  hasMoreMessagesBefore = Boolean(state.hasMoreMessagesBefore);
+  messagesLoadingOlder = false;
   isStreaming = state.isStreaming;
   streamingMessage = state.streamingMessage || null;
   thinkingLevel = state.thinkingLevel;
@@ -270,9 +308,6 @@ function handleAgentEvent(event: any) {
     case "agent_end":
       isStreaming = false;
       streamingMessage = null;
-      if (event.messages) {
-        messages = event.messages;
-      }
       updateStreamingContainer(null, false);
       renderApp();
       break;
@@ -335,6 +370,19 @@ function updateStreamingContainer(message: AgentMessage | null, streaming: boole
   }
 }
 
+function requestOlderMessages() {
+  if (!agentReady || messagesLoadingOlder || !hasMoreMessagesBefore || messagesOffset <= 0) return;
+  messagesLoadingOlder = true;
+  const nextOffset = Math.max(0, messagesOffset - 60);
+  send({ type: "getMessages", offset: nextOffset, limit: messagesOffset - nextOffset });
+  renderApp();
+}
+
+function handleMessagesScroll(event: Event) {
+  const el = event.currentTarget as HTMLElement;
+  if (el.scrollTop < 160) requestOlderMessages();
+}
+
 function scrollMessagesToBottom(force = false) {
   const scrollEl = document.getElementById("messages-scroll");
   if (!scrollEl) return;
@@ -388,14 +436,38 @@ function handleNewSession() {
   closeSidebar();
 }
 
+function requestSessions(reset = true) {
+  if (!agentReady) return;
+  if (reset) {
+    sessionsLoading = true;
+    sessionsLoadingMore = false;
+    sessionsOffset = 0;
+    send({ type: "getSessions", offset: 0, limit: 30, query: sessionSearch });
+  } else if (sessionsHasMore && !sessionsLoading && !sessionsLoadingMore) {
+    sessionsLoadingMore = true;
+    send({ type: "getSessions", offset: sessionsOffset, limit: 30, query: sessionSearch });
+  }
+  renderApp();
+}
+
+function handleSessionSearchInput(event: Event) {
+  sessionSearch = (event.target as HTMLInputElement).value;
+  if (sessionSearchTimer) window.clearTimeout(sessionSearchTimer);
+  sessionSearchTimer = window.setTimeout(() => {
+    sessionSearchTimer = undefined;
+    requestSessions(true);
+  }, 250);
+  renderApp();
+}
+
+function handleSessionListScroll(event: Event) {
+  const el = event.currentTarget as HTMLElement;
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 160) requestSessions(false);
+}
+
 function toggleSidebar() {
   sidebarOpen = !sidebarOpen;
-  if (sidebarOpen) {
-    sessionsLoading = true;
-    if (agentReady) {
-      send({ type: "getSessions" });
-    }
-  }
+  if (sidebarOpen) requestSessions(true);
   renderApp();
 }
 
@@ -486,8 +558,18 @@ function renderSidebar() {
         </div>
       </div>
 
-      <div class="flex-1 overflow-y-auto">
-        ${sessionsLoading ? html`
+      <div class="sidebar-search">
+        <input
+          class="sidebar-search-input"
+          type="search"
+          placeholder="Search conversations..."
+          .value=${sessionSearch}
+          @input=${handleSessionSearchInput}
+        />
+      </div>
+
+      <div class="flex-1 overflow-y-auto" @scroll=${handleSessionListScroll}>
+        ${sessionsLoading && sessionList.length === 0 ? html`
           <div class="sidebar-empty">
             Loading sessions...
           </div>
@@ -497,23 +579,27 @@ function renderSidebar() {
           </div>
         ` : sessionList.length === 0 ? html`
           <div class="sidebar-empty">
-            No sessions found
+            ${sessionSearch ? "No matching sessions" : "No sessions found"}
           </div>
-        ` : sessionList.map((s) => html`
-          <button
-            class="session-item ${s.id === currentSessionId ? 'active' : ''}"
-            @click=${() => handleLoadSession(s.path)}
-          >
-            <div class="session-item-title">${sessionTitle(s)}</div>
-            ${s.name && s.firstMessage ? html`
-              <div class="session-item-preview">${truncateText(s.firstMessage, 80)}</div>
-            ` : nothing}
-            <div class="session-item-meta">
-              <span>${s.messageCount} messages</span>
-              <span>${formatRelativeTime(s.modified)}</span>
-            </div>
-          </button>
-        `)}
+        ` : html`
+          ${sessionList.map((s) => html`
+            <button
+              class="session-item ${s.id === currentSessionId ? 'active' : ''}"
+              @click=${() => handleLoadSession(s.path)}
+            >
+              <div class="session-item-title">${sessionTitle(s)}</div>
+              ${s.name && s.firstMessage ? html`
+                <div class="session-item-preview">${truncateText(s.firstMessage, 80)}</div>
+              ` : nothing}
+              <div class="session-item-meta">
+                <span>${s.messageCount} messages</span>
+                <span>${formatRelativeTime(s.modified)}</span>
+              </div>
+            </button>
+          `)}
+          ${sessionsLoadingMore ? html`<div class="sidebar-empty sidebar-loading-more">Loading more...</div>` : nothing}
+          ${sessionsHasMore && !sessionsLoadingMore ? html`<button class="sidebar-load-more" type="button" @click=${() => requestSessions(false)}>Load more</button>` : nothing}
+        `}
       </div>
     </div>
   `;
@@ -618,7 +704,7 @@ function renderApp() {
 
         <!-- Thinking level -->
         <select
-          class="text-xs px-1.5 py-1 rounded border border-border bg-background shrink-0"
+          class="thinking-select text-xs px-1.5 py-1 rounded border border-border bg-background shrink-0"
           .value=${thinkingLevel}
           @change=${(e: Event) => handleThinkingChange((e.target as HTMLSelectElement).value)}
         >
@@ -646,13 +732,18 @@ function renderApp() {
       ` : ""}
 
       <!-- Messages area -->
-      <div class="flex-1 overflow-y-auto px-3 sm:px-4 py-4" id="messages-scroll">
+      <div class="flex-1 overflow-y-auto px-3 sm:px-4 py-4" id="messages-scroll" @scroll=${handleMessagesScroll}>
         ${messages.length === 0 && !isStreaming ? html`
           <div class="flex items-center justify-center h-full text-muted-foreground text-sm">
             Send a message to start a conversation
           </div>
         ` : html`
           <div class="max-w-4xl mx-auto flex flex-col gap-3">
+            ${hasMoreMessagesBefore ? html`
+              <button class="message-load-older" type="button" @click=${requestOlderMessages} ?disabled=${messagesLoadingOlder}>
+                ${messagesLoadingOlder ? "Loading earlier messages..." : `Load earlier messages (${messagesOffset} older)`}
+              </button>
+            ` : nothing}
             <message-list
               .messages=${messages}
               .tools=${[]}

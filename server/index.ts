@@ -85,7 +85,10 @@ app.get("/{*path}", (_req, res) => {
 
 const HOME_DIR = os.homedir();
 const AGENT_SETTINGS_PATH = path.join(HOME_DIR, ".pi", "agent", "settings.json");
-const SESSION_LIST_LIMIT = parseIntEnv("SESSION_LIST_LIMIT", 50);
+const SESSION_LIST_LIMIT = parseIntEnv("SESSION_LIST_LIMIT", 30);
+const SESSION_LIST_MAX_LIMIT = parseIntEnv("SESSION_LIST_MAX_LIMIT", 100);
+const MESSAGE_PAGE_LIMIT = parseIntEnv("MESSAGE_PAGE_LIMIT", 60);
+const MESSAGE_PAGE_MAX_LIMIT = parseIntEnv("MESSAGE_PAGE_MAX_LIMIT", 200);
 const SESSION_LIST_CACHE_MS = parseIntEnv("SESSION_LIST_CACHE_MS", 10000);
 
 let authStorage: AuthStorage;
@@ -93,7 +96,7 @@ let modelRegistry: ModelRegistry;
 type ClientRuntime = { session: AgentSession; unsubscribe?: () => void };
 const clients = new Map<WebSocket, ClientRuntime>();
 const syntheticModels = new Map<string, Model<Api>>();
-let sessionListCache: { expires: number; items: SessionListItem[] } | undefined;
+let sessionListCache: { expires: number; files: { filePath: string; mtime: Date }[] } | undefined;
 
 function modelToInfo(model: Model<Api>, scoped = false): ModelInfo {
   return {
@@ -178,9 +181,16 @@ function getMessageCompletionTimes(session: AgentSession): Map<string, number[]>
   return completedAtByKey;
 }
 
-function serializeMessages(session: AgentSession): any[] {
-  const messages = session.agent.state.messages;
+function serializeMessages(session: AgentSession, offset = 0, limit?: number): any[] {
+  const source = session.agent.state.messages;
+  const messages = limit === undefined ? source.slice(offset) : source.slice(offset, offset + limit);
   const completedAtByKey = getMessageCompletionTimes(session);
+  for (let i = 0; i < offset; i++) {
+    const message = source[i] as any;
+    if (!message) continue;
+    const key = `${message.role}:${message.timestamp ?? ""}`;
+    completedAtByKey.get(key)?.shift();
+  }
   return messages.map((message: any) => {
     const key = `${message.role}:${message.timestamp ?? ""}`;
     const completedAt = completedAtByKey.get(key)?.shift();
@@ -189,11 +199,30 @@ function serializeMessages(session: AgentSession): any[] {
   });
 }
 
+function messagePage(session: AgentSession, offset: number, limit = MESSAGE_PAGE_LIMIT) {
+  const total = session.agent.state.messages.length;
+  const safeLimit = Math.min(Math.max(1, Math.floor(limit)), MESSAGE_PAGE_MAX_LIMIT);
+  const safeOffset = Math.min(Math.max(0, Math.floor(offset)), total);
+  return {
+    messages: serializeMessages(session, safeOffset, safeLimit),
+    offset: safeOffset,
+    limit: safeLimit,
+    total,
+    hasMoreBefore: safeOffset > 0,
+  };
+}
+
 function serializeState(session: AgentSession, overrides: Partial<Pick<SerializedAgentState, "isStreaming">> & { streamingMessage?: any } = {}): SerializedAgentState {
   const state = session.agent.state;
   const hasStreamingMessageOverride = Object.prototype.hasOwnProperty.call(overrides, "streamingMessage");
+  const totalMessages = state.messages.length;
+  const messagesOffset = Math.max(0, totalMessages - MESSAGE_PAGE_LIMIT);
+  const messages = serializeMessages(session, messagesOffset, MESSAGE_PAGE_LIMIT);
   return {
-    messages: serializeMessages(session),
+    messages,
+    messagesOffset,
+    messagesTotal: totalMessages,
+    hasMoreMessagesBefore: messagesOffset > 0,
     model: state.model ? modelToInfo(state.model) : undefined,
     thinkingLevel: session.thinkingLevel,
     systemPrompt: state.systemPrompt,
@@ -278,36 +307,51 @@ function sessionItemFromContent(filePath: string, content: string, mtime: Date):
   };
 }
 
-async function listRecentSessions(): Promise<SessionListItem[]> {
+async function sessionFiles(): Promise<{ filePath: string; mtime: Date }[]> {
   const now = Date.now();
-  if (sessionListCache && sessionListCache.expires > now) {
-    return sessionListCache.items;
-  }
+  if (sessionListCache && sessionListCache.expires > now) return sessionListCache.files;
 
   const dir = getSessionDir(HOME_DIR);
   const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
-  const files = await Promise.all(entries
+  const files = (await Promise.all(entries
     .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
     .map(async (entry) => {
       const filePath = path.join(dir, entry.name);
       const stats = await fs.promises.stat(filePath).catch(() => undefined);
       return stats ? { filePath, mtime: stats.mtime } : undefined;
-    }));
-
-  const newest = files
+    })))
     .filter((file): file is { filePath: string; mtime: Date } => Boolean(file))
-    .sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
-    .slice(0, SESSION_LIST_LIMIT);
+    .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
-  const items = (await Promise.all(newest.map(async ({ filePath, mtime }) => {
+  sessionListCache = { expires: now + SESSION_LIST_CACHE_MS, files };
+  return files;
+}
+
+async function listRecentSessions(options: { offset?: number; limit?: number; query?: string } = {}): Promise<{ items: SessionListItem[]; total: number; hasMore: boolean; offset: number; limit: number; query: string }> {
+  const offset = Math.max(0, Math.floor(options.offset || 0));
+  const limit = Math.min(Math.max(1, Math.floor(options.limit || SESSION_LIST_LIMIT)), SESSION_LIST_MAX_LIMIT);
+  const query = (options.query || "").trim().toLowerCase();
+  const files = await sessionFiles();
+  const matched: SessionListItem[] = [];
+  let seenMatches = 0;
+  let hasMore = false;
+
+  for (const { filePath, mtime } of files) {
     const content = await fs.promises.readFile(filePath, "utf8").catch(() => "");
-    return content ? sessionItemFromContent(filePath, content, mtime) : undefined;
-  })))
-    .filter((item): item is SessionListItem => Boolean(item))
-    .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+    if (!content) continue;
+    const item = sessionItemFromContent(filePath, content, mtime);
+    if (!item) continue;
+    const haystack = query ? `${item.name || ""}\n${item.firstMessage}\n${content}`.toLowerCase() : "";
+    if (query && !haystack.includes(query)) continue;
+    if (seenMatches++ < offset) continue;
+    if (matched.length >= limit) {
+      hasMore = true;
+      break;
+    }
+    matched.push(item);
+  }
 
-  sessionListCache = { expires: now + SESSION_LIST_CACHE_MS, items };
-  return items;
+  return { items: matched, total: offset + matched.length + (hasMore ? 1 : 0), hasMore, offset, limit, query: options.query || "" };
 }
 
 function clearSessionListCache() {
@@ -531,7 +575,11 @@ async function createWebUiSession(sessionManager: SessionManager) {
 function safeSerializeEvent(event: AgentSessionEvent): any {
   try {
     const json = JSON.stringify(event);
-    return JSON.parse(json);
+    const parsed = JSON.parse(json);
+    if (parsed?.type === "agent_end" && Array.isArray(parsed.messages)) {
+      return { ...parsed, messages: undefined, messagesTruncated: true };
+    }
+    return parsed;
   } catch {
     // If circular refs or non-serializable data, return a simplified version
     return { type: (event as any).type, _serialized: false };
@@ -576,6 +624,8 @@ function isClientMessage(value: any): value is ClientMessage {
       return typeof value.level === "string";
     case "loadSession":
       return typeof value.sessionPath === "string";
+    case "getMessages":
+      return typeof value.offset === "number";
     case "abort":
     case "getModels":
     case "getState":
@@ -676,9 +726,14 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         console.log(`New session created: ${session.sessionId}`);
         break;
       }
+      case "getMessages": {
+        const page = messagePage(session, msg.offset, msg.limit);
+        send(ws, { type: "messagePage", messages: page.messages, offset: page.offset, limit: page.limit, total: page.total, hasMoreBefore: page.hasMoreBefore });
+        break;
+      }
       case "getSessions": {
-        const items = await listRecentSessions();
-        send(ws, { type: "sessions", sessions: items, currentSessionId: session.sessionId });
+        const sessionPage = await listRecentSessions({ offset: msg.offset, limit: msg.limit, query: msg.query });
+        send(ws, { type: "sessions", sessions: sessionPage.items, currentSessionId: session.sessionId, offset: sessionPage.offset, limit: sessionPage.limit, total: sessionPage.total, hasMore: sessionPage.hasMore, query: sessionPage.query });
         break;
       }
       case "loadSession": {

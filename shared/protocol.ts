@@ -10,7 +10,8 @@ export type ClientMessage =
   | { type: "setThinkingLevel"; level: string }
   | { type: "getState" }
   | { type: "newSession" }
-  | { type: "getSessions" }
+  | { type: "getSessions"; offset?: number; limit?: number; query?: string }
+  | { type: "getMessages"; offset: number; limit?: number }
   | { type: "loadSession"; sessionPath: string };
 
 // ── Server → Client messages ──
@@ -40,11 +41,15 @@ export type ServerMessage =
   | { type: "modelChanged"; model: ModelInfo; thinkingLevel: string }
   | { type: "error"; message: string }
   | { type: "ready" }
-  | { type: "sessions"; sessions: SessionListItem[]; currentSessionId: string }
+  | { type: "sessions"; sessions: SessionListItem[]; currentSessionId: string; offset?: number; limit?: number; total?: number; hasMore?: boolean; query?: string }
+  | { type: "messagePage"; messages: any[]; offset: number; limit: number; total: number; hasMoreBefore: boolean }
   | { type: "sessionChanged"; sessionId: string };
 
 export interface SerializedAgentState {
   messages: any[];
+  messagesOffset?: number;
+  messagesTotal?: number;
+  hasMoreMessagesBefore?: boolean;
   model?: ModelInfo;
   thinkingLevel: string;
   systemPrompt: string;
