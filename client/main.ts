@@ -46,6 +46,7 @@ function prettyToolValue(value: unknown): { code: string; language: string } {
 
 const toolCollapseOverrides = new Map<string, "full" | "collapsed">();
 const autoCollapsedToolIds = new Set<string>();
+const seenToolCallIds = new Set<string>();
 let activeToolCallId = "";
 
 type ToolProgressiveMode = "input" | "result" | "full" | "collapsed";
@@ -126,11 +127,20 @@ function progressiveToolMode(toolCallId: string, hasResult: boolean): ToolProgre
 
 function collapsePreviousToolCallsFor(newToolCallId: string) {
   if (!newToolCallId || activeToolCallId === newToolCallId) return;
-  for (const id of allVisibleToolCallIds()) {
+  for (const id of seenToolCallIds) {
     if (id !== newToolCallId && !toolCollapseOverrides.has(id)) autoCollapsedToolIds.add(id);
   }
   activeToolCallId = newToolCallId;
   autoCollapsedToolIds.delete(newToolCallId);
+}
+
+function noteVisibleToolCalls(message: any) {
+  if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
+  for (const part of message.content) {
+    if (part?.type !== "toolCall" || typeof part.id !== "string" || seenToolCallIds.has(part.id)) continue;
+    collapsePreviousToolCallsFor(part.id);
+    seenToolCallIds.add(part.id);
+  }
 }
 
 function renderProgressiveToolMessage(toolCall: any, result: ToolResultMessage | undefined, pending: boolean, aborted: boolean, isStreaming: boolean, host: any) {
@@ -443,6 +453,7 @@ function applyStateSync(state: SerializedAgentState) {
   if (currentSessionId && currentSessionId !== state.sessionId) {
     toolCollapseOverrides.clear();
     autoCollapsedToolIds.clear();
+    seenToolCallIds.clear();
     activeToolCallId = "";
   }
   currentSessionId = state.sessionId;
@@ -474,12 +485,14 @@ function handleAgentEvent(event: any) {
       break;
 
     case "message_update":
+      noteVisibleToolCalls(event.message);
       streamingMessage = event.message;
       updateStreamingContainer(event.message, true);
       requestAnimationFrame(() => scrollMessagesToBottom(true));
       break;
 
     case "message_end":
+      noteVisibleToolCalls(event.message);
       if (event.message) {
         const existing = messages.findIndex(
           (m: any) => m.timestamp === (event.message as any).timestamp && m.role === event.message.role
@@ -512,7 +525,10 @@ function handleAgentEvent(event: any) {
       break;
 
     case "tool_execution_start":
-      if (typeof event.toolCallId === "string") collapsePreviousToolCallsFor(event.toolCallId);
+      if (typeof event.toolCallId === "string" && !seenToolCallIds.has(event.toolCallId)) {
+        collapsePreviousToolCallsFor(event.toolCallId);
+        seenToolCallIds.add(event.toolCallId);
+      }
       renderApp();
       break;
     case "tool_execution_update":
