@@ -121,10 +121,7 @@ function progressiveToolMode(toolCallId: string, hasResult: boolean): ToolProgre
   const override = toolCollapseOverrides.get(toolCallId);
   if (override) return override;
   if (autoCollapsedToolIds.has(toolCallId)) return "collapsed";
-  if (!hasResult) return "input";
-  const order = allVisibleToolCallIds();
-  const index = order.indexOf(toolCallId);
-  return index >= 0 && index < order.length - 1 ? "collapsed" : "result";
+  return hasResult ? "result" : "input";
 }
 
 function collapsePreviousToolCallsFor(newToolCallId: string) {
