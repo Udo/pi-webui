@@ -28,6 +28,169 @@ import type {
   SessionListItem,
 } from "../shared/protocol.js";
 
+function toolResultText(result: ToolResultMessage | undefined): string {
+  return result?.content
+    ?.filter((part: any) => part?.type === "text" && typeof part.text === "string")
+    .map((part: any) => part.text)
+    .join("\n") || "";
+}
+
+function prettyToolValue(value: unknown): { code: string; language: string } {
+  try {
+    if (typeof value === "string") return { code: JSON.stringify(JSON.parse(value), null, 2), language: "json" };
+    return { code: JSON.stringify(value ?? {}, null, 2), language: "json" };
+  } catch {
+    return { code: typeof value === "string" ? value : String(value ?? ""), language: "text" };
+  }
+}
+
+const toolCollapseOverrides = new Map<string, "full" | "collapsed">();
+const autoCollapsedToolIds = new Set<string>();
+let activeToolCallId = "";
+
+type ToolProgressiveMode = "input" | "result" | "full" | "collapsed";
+
+function toolArgsObject(args: any): Record<string, any> {
+  if (!args) return {};
+  if (typeof args === "string") {
+    try {
+      const parsed = JSON.parse(args);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof args === "object" && !Array.isArray(args) ? args : {};
+}
+
+function truncateInline(text: string, max = 120): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact.length > max ? `${compact.slice(0, max - 1)}…` : compact;
+}
+
+function summarizeToolCall(toolName: string, args: any): string {
+  const p = toolArgsObject(args);
+  if (toolName === "bash") return truncateInline(String(p.command || ""), 160);
+  if (["read", "write", "edit"].includes(toolName)) return truncateInline(String(p.path || ""), 140);
+  if (typeof p.query === "string" || typeof p.q === "string") return truncateInline(String(p.query || p.q), 140);
+  return "";
+}
+
+function firstCount(value: any): number | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  if (Array.isArray(value)) return value.length;
+  for (const key of ["items", "rows", "results", "entries"]) {
+    if (Array.isArray(value[key])) return value[key].length;
+  }
+  for (const child of Object.values(value)) {
+    const count = firstCount(child);
+    if (count !== undefined) return count;
+  }
+  return undefined;
+}
+
+function summarizeToolResult(result: ToolResultMessage | undefined): string {
+  if (!result) return "";
+  const text = toolResultText(result);
+  let parsed: any;
+  try { parsed = text ? JSON.parse(text) : result.details; } catch { parsed = result.details; }
+  const count = firstCount(parsed);
+  const parts = [];
+  if (result.isError) parts.push("error");
+  if (typeof count === "number") parts.push(`${count} item${count === 1 ? "" : "s"}`);
+  if (parsed?.page?.has_more) parts.push("more available");
+  if (parsed?.truncated || parsed?.page?.truncated) parts.push("truncated");
+  if (parts.length > 0) return parts.join(" · ");
+  return text ? `${text.length.toLocaleString()} chars` : "no output";
+}
+
+function allVisibleToolCallIds(): string[] {
+  const ids: string[] = [];
+  const scanMessage = (message: any) => {
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
+    for (const part of message.content) {
+      if (part?.type === "toolCall" && typeof part.id === "string") ids.push(part.id);
+    }
+  };
+  for (const message of messages) scanMessage(message);
+  scanMessage(streamingMessage);
+  return ids;
+}
+
+function progressiveToolMode(toolCallId: string, hasResult: boolean): ToolProgressiveMode {
+  const override = toolCollapseOverrides.get(toolCallId);
+  if (override) return override;
+  if (autoCollapsedToolIds.has(toolCallId)) return "collapsed";
+  if (!hasResult) return "input";
+  const order = allVisibleToolCallIds();
+  const index = order.indexOf(toolCallId);
+  return index >= 0 && index < order.length - 1 ? "collapsed" : "result";
+}
+
+function collapsePreviousToolCallsFor(newToolCallId: string) {
+  if (!newToolCallId || activeToolCallId === newToolCallId) return;
+  for (const id of allVisibleToolCallIds()) {
+    if (id !== newToolCallId && !toolCollapseOverrides.has(id)) autoCollapsedToolIds.add(id);
+  }
+  activeToolCallId = newToolCallId;
+  autoCollapsedToolIds.delete(newToolCallId);
+}
+
+function renderProgressiveToolMessage(toolCall: any, result: ToolResultMessage | undefined, pending: boolean, aborted: boolean, isStreaming: boolean, host: any) {
+  const effectiveResult = aborted ? ({ isError: true, content: [], toolCallId: toolCall.id, toolName: toolCall.name, timestamp: Date.now() } as any) : result;
+  const mode = progressiveToolMode(toolCall.id, Boolean(effectiveResult));
+  const args = toolArgsObject(toolCall.arguments);
+  const commandInput = toolCall.name === "bash" && typeof args.command === "string" ? { code: args.command, language: "bash" } : undefined;
+  const input = commandInput || prettyToolValue(toolCall.arguments);
+  const outputText = toolResultText(effectiveResult) || (effectiveResult ? "(no output)" : "");
+  const output = prettyToolValue(outputText);
+  const status = effectiveResult ? (effectiveResult.isError ? "error" : "complete") : pending || isStreaming ? "running" : "waiting";
+  const callSummary = summarizeToolCall(toolCall.name, toolCall.arguments);
+  const resultSummary = summarizeToolResult(effectiveResult);
+  const toggle = (event: Event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toolCollapseOverrides.set(toolCall.id, mode === "collapsed" ? "full" : "collapsed");
+    host.requestUpdate();
+  };
+  const showInput = mode === "input" || mode === "full";
+  const showResult = Boolean(effectiveResult) && (mode === "result" || mode === "full");
+
+  return html`
+    <div class="progressive-tool-card ${mode} ${status}">
+      <button class="progressive-tool-header" type="button" @click=${toggle} aria-expanded=${mode !== "collapsed"}>
+        <span class="progressive-tool-title">
+          <span class="progressive-tool-status-dot"></span>
+          <span>${toolCall.name}</span>
+          ${callSummary ? html`<span class="progressive-tool-call-summary">${callSummary}</span>` : nothing}
+        </span>
+        <span class="progressive-tool-state">${resultSummary || (mode === "collapsed" ? "collapsed" : status)}</span>
+      </button>
+      ${mode === "collapsed" ? nothing : html`
+        <div class="progressive-tool-body">
+          ${showInput ? html`
+            <div class="progressive-tool-section">
+              <div class="progressive-tool-section-label">Input</div>
+              <code-block .code=${input.code} language=${input.language}></code-block>
+            </div>
+          ` : effectiveResult ? html`
+            <details class="progressive-tool-input-details">
+              <summary>Input</summary>
+              <code-block .code=${input.code} language=${input.language}></code-block>
+            </details>
+          ` : nothing}
+          ${showResult ? html`
+            <div class="progressive-tool-section">
+              <div class="progressive-tool-section-label">Result</div>
+              <code-block .code=${output.code} language=${output.language}></code-block>
+            </div>
+          ` : nothing}
+        </div>
+      `}
+    </div>
+  `;
+}
+
 function formatTokensPerSecond(message: any): string | undefined {
   const outputTokens = message?.usage?.output;
   const startedAt = message?.timestamp;
@@ -61,19 +224,11 @@ function installAssistantMetadataRenderer() {
       } else if (chunk.type === "thinking" && chunk.thinking.trim() !== "") {
         orderedParts.push(html`<thinking-block .content=${chunk.thinking} .isStreaming=${this.isStreaming}></thinking-block>`);
       } else if (chunk.type === "toolCall" && !this.hideToolCalls) {
-        const tool = this.tools?.find((t: any) => t.name === chunk.name);
         const pending = this.pendingToolCalls?.has(chunk.id) ?? false;
         const result = this.toolResultsById?.get(chunk.id);
         if (this.hidePendingToolCalls && pending && !result) continue;
         const aborted = this.message.stopReason === "aborted" && !result;
-        orderedParts.push(html`<tool-message
-          .tool=${tool}
-          .toolCall=${chunk}
-          .result=${result}
-          .pending=${pending}
-          .aborted=${aborted}
-          .isStreaming=${this.isStreaming}
-        ></tool-message>`);
+        orderedParts.push(renderProgressiveToolMessage(chunk, result, pending, aborted, this.isStreaming, this));
       }
     }
 
@@ -288,6 +443,11 @@ function applyStateSync(state: SerializedAgentState) {
   toolNames = state.tools;
   if (state.model) currentModel = state.model;
   if (state.errorMessage) errorMessage = state.errorMessage;
+  if (currentSessionId && currentSessionId !== state.sessionId) {
+    toolCollapseOverrides.clear();
+    autoCollapsedToolIds.clear();
+    activeToolCallId = "";
+  }
   currentSessionId = state.sessionId;
   currentSessionName = state.sessionName;
   currentSessionPath = state.sessionPath;
@@ -355,6 +515,9 @@ function handleAgentEvent(event: any) {
       break;
 
     case "tool_execution_start":
+      if (typeof event.toolCallId === "string") collapsePreviousToolCallsFor(event.toolCallId);
+      renderApp();
+      break;
     case "tool_execution_update":
     case "tool_execution_end":
       renderApp();

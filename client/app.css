@@ -270,6 +270,114 @@ textarea {
   opacity: 0.7;
 }
 
+.progressive-tool-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+}
+
+.progressive-tool-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0.7rem;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 0.875rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.progressive-tool-header:hover {
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--accent) 35%, transparent);
+}
+
+.progressive-tool-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.progressive-tool-title span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progressive-tool-call-summary {
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-weight: 400;
+  opacity: 0.85;
+}
+
+.progressive-tool-call-summary::before {
+  content: "—";
+  margin-right: 0.5rem;
+  opacity: 0.7;
+}
+
+.progressive-tool-state {
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+  opacity: 0.75;
+}
+
+.progressive-tool-status-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  background: var(--muted-foreground);
+}
+
+.progressive-tool-card.running .progressive-tool-status-dot,
+.progressive-tool-card.waiting .progressive-tool-status-dot {
+  background: var(--primary, #2563eb);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.progressive-tool-card.complete .progressive-tool-status-dot {
+  background: #16a34a;
+}
+
+.progressive-tool-card.error .progressive-tool-status-dot {
+  background: var(--destructive, #dc2626);
+}
+
+.progressive-tool-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0 0.7rem 0.7rem;
+}
+
+.progressive-tool-section-label,
+.progressive-tool-input-details summary {
+  margin-bottom: 0.25rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.progressive-tool-input-details summary {
+  cursor: pointer;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
 .model-option-current {
   background: color-mix(in oklab, var(--accent) 50%, transparent);
 }
