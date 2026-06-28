@@ -607,7 +607,7 @@ function toggleModelDropdown() {
 
 function handleNewSession() {
   send({ type: "newSession" });
-  closeSidebar();
+  renderApp();
 }
 
 function requestSessions(reset = true) {
