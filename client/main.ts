@@ -118,11 +118,9 @@ function allVisibleToolCallIds(): string[] {
   return ids;
 }
 
-function progressiveToolMode(toolCallId: string, hasResult: boolean): ToolProgressiveMode {
+function progressiveToolMode(toolCallId: string, _hasResult: boolean): ToolProgressiveMode {
   const override = toolCollapseOverrides.get(toolCallId);
-  if (override) return override;
-  if (autoCollapsedToolIds.has(toolCallId)) return "collapsed";
-  return hasResult ? "result" : "input";
+  return override === "full" ? "full" : "collapsed";
 }
 
 function collapsePreviousToolCallsFor(newToolCallId: string) {
@@ -171,7 +169,7 @@ function renderProgressiveToolMessage(toolCall: any, result: ToolResultMessage |
           <span>${toolCall.name}</span>
           ${callSummary ? html`<span class="progressive-tool-call-summary">${callSummary}</span>` : nothing}
         </span>
-        <span class="progressive-tool-state">${resultSummary || (mode === "collapsed" ? "collapsed" : status)}</span>
+        <span class="progressive-tool-state">${resultSummary || status}</span>
       </button>
       ${mode === "collapsed" ? nothing : html`
         <div class="progressive-tool-body">
