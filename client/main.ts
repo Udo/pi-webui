@@ -287,6 +287,7 @@ let sessionsHasMore = false;
 let sessionsOffset = 0;
 let sessionSearch = "";
 let sessionSearchTimer: number | undefined;
+let pendingChoice: any | null = null;
 
 // ── WebSocket ──
 
@@ -522,6 +523,15 @@ function handleAgentEvent(event: any) {
       renderApp();
       break;
 
+    case "choice_request":
+      pendingChoice = event.request;
+      renderApp();
+      requestAnimationFrame(() => scrollMessagesToBottom(true));
+      break;
+    case "choice_resolved":
+      if (pendingChoice?.id === event.requestId) pendingChoice = null;
+      renderApp();
+      break;
     case "tool_execution_start":
       if (typeof event.toolCallId === "string" && !seenToolCallIds.has(event.toolCallId)) {
         collapsePreviousToolCallsFor(event.toolCallId);
@@ -779,6 +789,30 @@ function renderSidebar() {
   `;
 }
 
+function handleChoiceResponse(request: any, choiceId: string) {
+  const selected = request?.allowMultiple ? [choiceId] : [choiceId];
+  send({ type: "choiceResponse", requestId: String(request.id), selected });
+  pendingChoice = null;
+  renderApp();
+}
+
+function renderChoiceRequest() {
+  if (!pendingChoice) return nothing;
+  return html`
+    <div class="choice-request-card" role="group" aria-label="Agent choice request">
+      <div class="choice-request-title">${pendingChoice.prompt || "Please choose an option."}</div>
+      <div class="choice-request-options">
+        ${(pendingChoice.choices || []).map((choice: any) => html`
+          <button class="choice-request-option" type="button" @click=${() => handleChoiceResponse(pendingChoice, choice.id)}>
+            <span class="choice-request-label">${choice.label || choice.id}</span>
+            ${choice.description ? html`<span class="choice-request-description">${choice.description}</span>` : nothing}
+          </button>
+        `)}
+      </div>
+    </div>
+  `;
+}
+
 function renderApp() {
   const app = document.getElementById("app");
   if (!app) return;
@@ -932,6 +966,7 @@ function renderApp() {
               .pendingToolCalls=${new Set()}
               .toolResultsById=${toolResultsById}
             ></streaming-message-container>
+            ${renderChoiceRequest()}
           </div>
         `}
       </div>

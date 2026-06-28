@@ -11,10 +11,11 @@ import {
   createAgentSession,
   ModelRegistry,
   SessionManager,
+  defineTool,
   type AgentSession,
   type AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
-import type { Model, Api } from "@mariozechner/pi-ai";
+import { Type, type Model, type Api } from "@mariozechner/pi-ai";
 import type {
   ClientMessage,
   ServerMessage,
@@ -93,7 +94,14 @@ const SESSION_LIST_CACHE_MS = parseIntEnv("SESSION_LIST_CACHE_MS", 10000);
 
 let authStorage: AuthStorage;
 let modelRegistry: ModelRegistry;
-type ClientRuntime = { session: AgentSession; unsubscribe?: () => void };
+type ChoiceRequest = {
+  id: string;
+  prompt: string;
+  choices: Array<{ id: string; label: string; description?: string }>;
+  allowMultiple: boolean;
+};
+
+type ClientRuntime = { session: AgentSession; unsubscribe?: () => void; pendingChoices?: Map<string, ChoiceRequest> };
 const clients = new Map<WebSocket, ClientRuntime>();
 const syntheticModels = new Map<string, Model<Api>>();
 let sessionListCache: { expires: number; files: { filePath: string; mtime: Date }[] } | undefined;
@@ -561,15 +569,59 @@ async function resolveInitialWebUiModel(): Promise<Model<Api> | undefined> {
     || available.find((m) => modelRegistry.hasConfiguredAuth(m));
 }
 
-async function createWebUiSession(sessionManager: SessionManager) {
+const requestChoiceParams = Type.Object({
+  prompt: Type.String({ description: "Short question shown to the user." }),
+  choices: Type.Array(Type.Object({
+    id: Type.String({ description: "Stable machine-readable choice id." }),
+    label: Type.String({ description: "Short button label." }),
+    description: Type.Optional(Type.String({ description: "Optional one-line explanation." })),
+  }), { description: "2-6 concrete choices." }),
+  allowMultiple: Type.Optional(Type.Boolean({ description: "Whether the user may choose multiple options. Default false." })),
+});
+
+function createRequestChoiceTool(onChoiceRequest: (request: ChoiceRequest) => void) {
+  return defineTool({
+    name: "request-choice",
+    label: "request-choice",
+    description: "Ask the user to choose from concrete options when guessing would be risky.",
+    promptSnippet: "request-choice: ask the user to choose one or more concrete options.",
+    promptGuidelines: [
+      "Use request-choice for discrete user decisions where guessing would be risky. Keep choices few and concrete.",
+      "After calling request-choice, stop and wait for the user's choice response instead of continuing to guess.",
+    ],
+    parameters: requestChoiceParams,
+    async execute(toolCallId, params) {
+      const choices = (params.choices || []).slice(0, 8).map((choice: any, index: number) => ({
+        id: String(choice.id || `choice-${index + 1}`).trim().slice(0, 80),
+        label: String(choice.label || choice.id || `Choice ${index + 1}`).trim().slice(0, 120),
+        description: choice.description ? String(choice.description).trim().slice(0, 300) : undefined,
+      })).filter((choice: any) => choice.id && choice.label);
+      const request: ChoiceRequest = {
+        id: toolCallId,
+        prompt: String(params.prompt || "Please choose an option.").trim().slice(0, 500),
+        choices,
+        allowMultiple: Boolean(params.allowMultiple),
+      };
+      onChoiceRequest(request);
+      const data = { type: "waiting_for_user_choice", request };
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], details: data };
+    },
+  });
+}
+
+async function createWebUiSession(sessionManager: SessionManager, onChoiceRequest: (request: ChoiceRequest) => void) {
   const initialModel = await resolveInitialWebUiModel();
-  return createAgentSession({
+  const customTools = [createRequestChoiceTool(onChoiceRequest)];
+  const result = await createAgentSession({
     cwd: HOME_DIR,
     authStorage,
     modelRegistry,
     sessionManager,
     model: initialModel,
+    customTools,
   });
+  result.session.setActiveToolsByName([...new Set([...result.session.getActiveToolNames(), ...customTools.map((tool) => tool.name)])]);
+  return result;
 }
 
 function safeSerializeEvent(event: AgentSessionEvent): any {
@@ -624,6 +676,8 @@ function isClientMessage(value: any): value is ClientMessage {
       return typeof value.level === "string";
     case "loadSession":
       return typeof value.sessionPath === "string";
+    case "choiceResponse":
+      return typeof value.requestId === "string" && Array.isArray(value.selected) && value.selected.every((item: any) => typeof item === "string");
     case "getMessages":
       return typeof value.offset === "number";
     case "abort":
@@ -660,6 +714,25 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
       }
       case "followUp": {
         await session.followUp(msg.text);
+        break;
+      }
+      case "choiceResponse": {
+        const request = runtime.pendingChoices?.get(msg.requestId);
+        if (!request) {
+          send(ws, { type: "error", message: "Choice request is no longer active" });
+          break;
+        }
+        const allowed = new Map(request.choices.map((choice) => [choice.id, choice]));
+        const selected = msg.selected.filter((id) => allowed.has(id));
+        if (!request.allowMultiple && selected.length > 1) selected.splice(1);
+        if (selected.length === 0) {
+          send(ws, { type: "error", message: "Please choose one of the listed options" });
+          break;
+        }
+        runtime.pendingChoices?.delete(msg.requestId);
+        const labels = selected.map((id) => `${id} (${allowed.get(id)?.label || id})`).join(", ");
+        await session.followUp(`Choice response for ${msg.requestId}: ${labels}`);
+        send(ws, { type: "agentEvent", event: { type: "choice_resolved", requestId: msg.requestId, selected } });
         break;
       }
       case "abort": {
@@ -716,7 +789,10 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
           await session.abort();
         }
 
-        const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR));
+        const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR), (request) => {
+          runtime.pendingChoices?.set(request.id, request);
+          send(ws, { type: "agentEvent", event: { type: "choice_request", request } });
+        });
         runtime.session = newSession;
         session = runtime.session;
         clearSessionListCache();
@@ -748,7 +824,10 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         }
 
         const loadedManager = SessionManager.open(requestedPath, undefined, HOME_DIR);
-        const { session: loadedSession } = await createWebUiSession(loadedManager);
+        const { session: loadedSession } = await createWebUiSession(loadedManager, (request) => {
+          runtime.pendingChoices?.set(request.id, request);
+          send(ws, { type: "agentEvent", event: { type: "choice_request", request } });
+        });
         runtime.session = loadedSession;
         session = runtime.session;
         clearSessionListCache();
@@ -782,8 +861,12 @@ async function main() {
     try {
       const url = new URL(request.url || "/api/ws", `http://${request.headers.host || "localhost"}`);
       const sessionManager = sessionManagerForResumePath(url.searchParams.get("sessionPath") || undefined);
-      const { session, modelFallbackMessage } = await createWebUiSession(sessionManager);
-      const runtime: ClientRuntime = { session };
+      const pendingChoices = new Map<string, ChoiceRequest>();
+      const { session, modelFallbackMessage } = await createWebUiSession(sessionManager, (request) => {
+        pendingChoices.set(request.id, request);
+        send(ws, { type: "agentEvent", event: { type: "choice_request", request } });
+      });
+      const runtime: ClientRuntime = { session, pendingChoices };
       clients.set(ws, runtime);
 
       if (modelFallbackMessage) {

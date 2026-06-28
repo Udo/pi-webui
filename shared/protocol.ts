@@ -12,7 +12,8 @@ export type ClientMessage =
   | { type: "newSession" }
   | { type: "getSessions"; offset?: number; limit?: number; query?: string }
   | { type: "getMessages"; offset: number; limit?: number }
-  | { type: "loadSession"; sessionPath: string };
+  | { type: "loadSession"; sessionPath: string }
+  | { type: "choiceResponse"; requestId: string; selected: string[] };
 
 // ── Server → Client messages ──
 
