@@ -101,7 +101,12 @@ type ChoiceRequest = {
   allowMultiple: boolean;
 };
 
-type ClientRuntime = { session: AgentSession; unsubscribe?: () => void; pendingChoices?: Map<string, ChoiceRequest> };
+type PendingChoiceRequest = ChoiceRequest & {
+  resolve: (selected: string[]) => void;
+  reject: (error: Error) => void;
+};
+
+type ClientRuntime = { session: AgentSession; unsubscribe?: () => void; pendingChoices?: Map<string, PendingChoiceRequest> };
 const clients = new Map<WebSocket, ClientRuntime>();
 const syntheticModels = new Map<string, Model<Api>>();
 let sessionListCache: { expires: number; files: { filePath: string; mtime: Date }[] } | undefined;
@@ -579,7 +584,7 @@ const requestChoiceParams = Type.Object({
   allowMultiple: Type.Optional(Type.Boolean({ description: "Whether the user may choose multiple options. Default false." })),
 });
 
-function createRequestChoiceTool(onChoiceRequest: (request: ChoiceRequest) => void) {
+function createRequestChoiceTool(onChoiceRequest: (request: ChoiceRequest, signal?: AbortSignal) => Promise<string[]>) {
   return defineTool({
     name: "request-choice",
     label: "request-choice",
@@ -590,26 +595,30 @@ function createRequestChoiceTool(onChoiceRequest: (request: ChoiceRequest) => vo
       "After calling request-choice, stop and wait for the user's choice response instead of continuing to guess.",
     ],
     parameters: requestChoiceParams,
-    async execute(toolCallId, params) {
+    async execute(toolCallId, params, signal) {
       const choices = (params.choices || []).slice(0, 8).map((choice: any, index: number) => ({
         id: String(choice.id || `choice-${index + 1}`).trim().slice(0, 80),
         label: String(choice.label || choice.id || `Choice ${index + 1}`).trim().slice(0, 120),
         description: choice.description ? String(choice.description).trim().slice(0, 300) : undefined,
       })).filter((choice: any) => choice.id && choice.label);
+      if (choices.length < 2) {
+        const data = { type: "error", error: "request_choice_needs_choices", message: "request-choice requires at least two non-empty choices." };
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], details: data } as any;
+      }
       const request: ChoiceRequest = {
         id: toolCallId,
         prompt: String(params.prompt || "Please choose an option.").trim().slice(0, 500),
         choices,
         allowMultiple: Boolean(params.allowMultiple),
       };
-      onChoiceRequest(request);
-      const data = { type: "waiting_for_user_choice", request };
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], details: data };
+      const selected = await onChoiceRequest(request, signal);
+      const data = { type: "choice_response", request, selected };
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], details: data } as any;
     },
   });
 }
 
-async function createWebUiSession(sessionManager: SessionManager, onChoiceRequest: (request: ChoiceRequest) => void) {
+async function createWebUiSession(sessionManager: SessionManager, onChoiceRequest: (request: ChoiceRequest, signal?: AbortSignal) => Promise<string[]>) {
   const initialModel = await resolveInitialWebUiModel();
   const customTools = [createRequestChoiceTool(onChoiceRequest)];
   const result = await createAgentSession({
@@ -622,6 +631,36 @@ async function createWebUiSession(sessionManager: SessionManager, onChoiceReques
   });
   result.session.setActiveToolsByName([...new Set([...result.session.getActiveToolNames(), ...customTools.map((tool) => tool.name)])]);
   return result;
+}
+
+function waitForChoiceResponse(ws: WebSocket, pendingChoices: Map<string, PendingChoiceRequest>, request: ChoiceRequest, signal?: AbortSignal): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const pending: PendingChoiceRequest = { ...request, resolve, reject };
+    const abort = () => {
+      pendingChoices.delete(request.id);
+      send(ws, { type: "agentEvent", event: { type: "choice_resolved", requestId: request.id, selected: [] } });
+      reject(new Error("Choice request was aborted"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    pending.resolve = (selected) => {
+      signal?.removeEventListener("abort", abort);
+      resolve(selected);
+    };
+    pending.reject = (error) => {
+      signal?.removeEventListener("abort", abort);
+      reject(error);
+    };
+    pendingChoices.set(request.id, pending);
+    send(ws, { type: "agentEvent", event: { type: "choice_request", request } });
+  });
+}
+
+function clearPendingChoices(ws: WebSocket, runtime: ClientRuntime, reason: string) {
+  for (const [id, pending] of runtime.pendingChoices || []) {
+    pending.reject(new Error(reason));
+    send(ws, { type: "agentEvent", event: { type: "choice_resolved", requestId: id, selected: [] } });
+  }
+  runtime.pendingChoices?.clear();
 }
 
 function safeSerializeEvent(event: AgentSessionEvent): any {
@@ -677,7 +716,7 @@ function isClientMessage(value: any): value is ClientMessage {
     case "loadSession":
       return typeof value.sessionPath === "string";
     case "choiceResponse":
-      return typeof value.requestId === "string" && Array.isArray(value.selected) && value.selected.every((item: any) => typeof item === "string");
+      return typeof value.requestId === "string" && value.requestId.length <= 200 && Array.isArray(value.selected) && value.selected.length <= 8 && value.selected.every((item: any) => typeof item === "string" && item.length <= 80);
     case "getMessages":
       return typeof value.offset === "number";
     case "abort":
@@ -730,8 +769,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
           break;
         }
         runtime.pendingChoices?.delete(msg.requestId);
-        const labels = selected.map((id) => `${id} (${allowed.get(id)?.label || id})`).join(", ");
-        await session.followUp(`Choice response for ${msg.requestId}: ${labels}`);
+        request.resolve(selected);
         send(ws, { type: "agentEvent", event: { type: "choice_resolved", requestId: msg.requestId, selected } });
         break;
       }
@@ -789,10 +827,8 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
           await session.abort();
         }
 
-        const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR), (request) => {
-          runtime.pendingChoices?.set(request.id, request);
-          send(ws, { type: "agentEvent", event: { type: "choice_request", request } });
-        });
+        clearPendingChoices(ws, runtime, "Session changed");
+        const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR), (request, signal) => waitForChoiceResponse(ws, runtime.pendingChoices!, request, signal));
         runtime.session = newSession;
         session = runtime.session;
         clearSessionListCache();
@@ -824,10 +860,8 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         }
 
         const loadedManager = SessionManager.open(requestedPath, undefined, HOME_DIR);
-        const { session: loadedSession } = await createWebUiSession(loadedManager, (request) => {
-          runtime.pendingChoices?.set(request.id, request);
-          send(ws, { type: "agentEvent", event: { type: "choice_request", request } });
-        });
+        clearPendingChoices(ws, runtime, "Session changed");
+        const { session: loadedSession } = await createWebUiSession(loadedManager, (request, signal) => waitForChoiceResponse(ws, runtime.pendingChoices!, request, signal));
         runtime.session = loadedSession;
         session = runtime.session;
         clearSessionListCache();
@@ -861,11 +895,8 @@ async function main() {
     try {
       const url = new URL(request.url || "/api/ws", `http://${request.headers.host || "localhost"}`);
       const sessionManager = sessionManagerForResumePath(url.searchParams.get("sessionPath") || undefined);
-      const pendingChoices = new Map<string, ChoiceRequest>();
-      const { session, modelFallbackMessage } = await createWebUiSession(sessionManager, (request) => {
-        pendingChoices.set(request.id, request);
-        send(ws, { type: "agentEvent", event: { type: "choice_request", request } });
-      });
+      const pendingChoices = new Map<string, PendingChoiceRequest>();
+      const { session, modelFallbackMessage } = await createWebUiSession(sessionManager, (request, signal) => waitForChoiceResponse(ws, pendingChoices, request, signal));
       const runtime: ClientRuntime = { session, pendingChoices };
       clients.set(ws, runtime);
 
@@ -902,6 +933,7 @@ async function main() {
     ws.on("close", () => {
       const runtime = clients.get(ws);
       if (runtime?.unsubscribe) runtime.unsubscribe();
+      if (runtime) clearPendingChoices(ws, runtime, "Client disconnected");
       if (runtime?.session.isStreaming) {
         runtime.session.abort().catch((err: any) => console.error("Abort on disconnect failed:", err));
       }

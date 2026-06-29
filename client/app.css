@@ -411,8 +411,24 @@ textarea {
   cursor: pointer;
 }
 
-.choice-request-option:hover {
+.choice-request-option:hover,
+.choice-request-option.selected {
   background: var(--accent);
+}
+
+.choice-request-submit {
+  margin-top: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  padding: 0.45rem 0.7rem;
+  cursor: pointer;
+}
+
+.choice-request-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .choice-request-label {

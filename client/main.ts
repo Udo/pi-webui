@@ -288,6 +288,7 @@ let sessionsOffset = 0;
 let sessionSearch = "";
 let sessionSearchTimer: number | undefined;
 let pendingChoice: any | null = null;
+let pendingChoiceSelected = new Set<string>();
 
 // ── WebSocket ──
 
@@ -525,11 +526,15 @@ function handleAgentEvent(event: any) {
 
     case "choice_request":
       pendingChoice = event.request;
+      pendingChoiceSelected = new Set();
       renderApp();
       requestAnimationFrame(() => scrollMessagesToBottom(true));
       break;
     case "choice_resolved":
-      if (pendingChoice?.id === event.requestId) pendingChoice = null;
+      if (pendingChoice?.id === event.requestId) {
+        pendingChoice = null;
+        pendingChoiceSelected = new Set();
+      }
       renderApp();
       break;
     case "tool_execution_start":
@@ -789,26 +794,44 @@ function renderSidebar() {
   `;
 }
 
-function handleChoiceResponse(request: any, choiceId: string) {
-  const selected = request?.allowMultiple ? [choiceId] : [choiceId];
+function submitChoiceResponse(request: any, selected: string[]) {
+  if (selected.length === 0) return;
   send({ type: "choiceResponse", requestId: String(request.id), selected });
   pendingChoice = null;
+  pendingChoiceSelected = new Set();
+  renderApp();
+}
+
+function togglePendingChoice(choiceId: string) {
+  const next = new Set(pendingChoiceSelected);
+  if (next.has(choiceId)) next.delete(choiceId);
+  else next.add(choiceId);
+  pendingChoiceSelected = next;
   renderApp();
 }
 
 function renderChoiceRequest() {
   if (!pendingChoice) return nothing;
+  const choices = pendingChoice.choices || [];
   return html`
     <div class="choice-request-card" role="group" aria-label="Agent choice request">
       <div class="choice-request-title">${pendingChoice.prompt || "Please choose an option."}</div>
       <div class="choice-request-options">
-        ${(pendingChoice.choices || []).map((choice: any) => html`
-          <button class="choice-request-option" type="button" @click=${() => handleChoiceResponse(pendingChoice, choice.id)}>
+        ${choices.map((choice: any) => pendingChoice.allowMultiple ? html`
+          <button class="choice-request-option ${pendingChoiceSelected.has(choice.id) ? 'selected' : ''}" type="button" @click=${() => togglePendingChoice(choice.id)}>
+            <span class="choice-request-label">${pendingChoiceSelected.has(choice.id) ? '☑' : '☐'} ${choice.label || choice.id}</span>
+            ${choice.description ? html`<span class="choice-request-description">${choice.description}</span>` : nothing}
+          </button>
+        ` : html`
+          <button class="choice-request-option" type="button" @click=${() => submitChoiceResponse(pendingChoice, [choice.id])}>
             <span class="choice-request-label">${choice.label || choice.id}</span>
             ${choice.description ? html`<span class="choice-request-description">${choice.description}</span>` : nothing}
           </button>
         `)}
       </div>
+      ${pendingChoice.allowMultiple ? html`
+        <button class="choice-request-submit" type="button" ?disabled=${pendingChoiceSelected.size === 0} @click=${() => submitChoiceResponse(pendingChoice, Array.from(pendingChoiceSelected))}>Send choice</button>
+      ` : nothing}
     </div>
   `;
 }
