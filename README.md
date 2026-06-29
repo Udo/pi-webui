@@ -35,6 +35,9 @@ npm run build
 | `HOST` | `127.0.0.1` | Server listen address. Use `0.0.0.0` only on a trusted network and with `PI_WEBUI_TOKEN` set. |
 | `PI_WEBUI_TOKEN` | *(unset)* | Optional shared secret for `/api/ws`. If set, open `/?token=<token>` once; the client stores it in local storage for reconnects and removes `token` from the visible URL. Query-string tokens may still appear in browser/proxy logs for the initial request and are readable by page JavaScript before removal, so use only on trusted local networks. If unset, access relies on WebSocket Origin checks. |
 | `PI_WEBUI_ALLOWED_ORIGINS` | same host as request | Optional comma-separated extra WebSocket `Origin` allowlist. |
+| `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Pi agent config directory for auth, models, settings, and sessions. |
+| `PI_WEBUI_RESTRICT_MODELS_TO_SCOPED` | *(unset)* | If true/yes/on/1, only models from `PI_WEBUI_MODEL`, `PI_MODEL`, `settings.defaultProvider/defaultModel`, or `settings.enabledModels` are listed/selectable. |
+| `PI_WEBUI_FORCE_MODEL_ALIAS_LABELS` | *(unset)* | If true/yes/on/1, show configured model aliases (`name`) instead of raw provider/model ids in the UI and response metadata. |
 | `SESSION_LIST_LIMIT` | `30` | Default sessions fetched per sidebar page. |
 | `SESSION_LIST_MAX_LIMIT` | `100` | Maximum sessions accepted per sidebar page request. |
 | `MESSAGE_PAGE_LIMIT` | `60` | Default newest messages sent for an opened conversation. |
@@ -62,9 +65,10 @@ HOST=127.0.0.1 PORT=8085 PI_WEBUI_TOKEN=change-me npm start
 ## Features
 
 - Full Pi agent with system access (bash, read, edit, write, extensions)
-- Per-browser-client session isolation with persistence and history — create new sessions, search conversations, and browse/resume previous sessions with paged loading
+- Per-browser-client session isolation with persistence and history — create new sessions, rename sessions, search conversations, and browse/resume previous sessions with paged loading
 - Model switching with scoped/default models first and an optional full model list (Pi model registry plus optional LiteLLM)
-- Configurable thinking level (off, minimal, low, medium, high)
+- Optional scoped-only model selection and alias-only model labels
+- Configurable thinking level (off, minimal, low, medium, high), with saved session model/thinking restored on resume
 - Streaming responses with tool execution display and paged conversation loading for long histories
 - Collapsible session sidebar (inline on desktop, overlay on mobile)
 - Dark/light theme toggle with green accent

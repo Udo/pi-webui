@@ -13,6 +13,7 @@ export type ClientMessage =
   | { type: "getSessions"; offset?: number; limit?: number; query?: string }
   | { type: "getMessages"; offset: number; limit?: number }
   | { type: "loadSession"; sessionPath: string }
+  | { type: "renameSession"; sessionPath: string; name: string }
   | { type: "choiceResponse"; requestId: string; selected: string[] };
 
 // ── Server → Client messages ──
@@ -22,6 +23,7 @@ export interface ModelInfo {
   id: string;
   name: string;
   scoped?: boolean;
+  forceAliasLabel?: boolean;
 }
 
 export interface SessionListItem {

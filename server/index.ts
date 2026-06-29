@@ -85,7 +85,8 @@ app.get("/{*path}", (_req, res) => {
 });
 
 const HOME_DIR = os.homedir();
-const AGENT_SETTINGS_PATH = path.join(HOME_DIR, ".pi", "agent", "settings.json");
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(HOME_DIR, ".pi", "agent");
+const AGENT_SETTINGS_PATH = path.join(AGENT_DIR, "settings.json");
 const SESSION_LIST_LIMIT = parseIntEnv("SESSION_LIST_LIMIT", 30);
 const SESSION_LIST_MAX_LIMIT = parseIntEnv("SESSION_LIST_MAX_LIMIT", 100);
 const MESSAGE_PAGE_LIMIT = parseIntEnv("MESSAGE_PAGE_LIMIT", 60);
@@ -109,7 +110,42 @@ type PendingChoiceRequest = ChoiceRequest & {
 type ClientRuntime = { session: AgentSession; unsubscribe?: () => void; pendingChoices?: Map<string, PendingChoiceRequest> };
 const clients = new Map<WebSocket, ClientRuntime>();
 const syntheticModels = new Map<string, Model<Api>>();
+let modelConfigStamp = "";
 let sessionListCache: { expires: number; files: { filePath: string; mtime: Date }[] } | undefined;
+
+function boolEnv(name: string): boolean {
+  return ["1", "true", "yes", "on"].includes((process.env[name] || "").trim().toLowerCase());
+}
+
+function restrictModelsToScoped(): boolean {
+  return boolEnv("PI_WEBUI_RESTRICT_MODELS_TO_SCOPED");
+}
+
+function forceModelAliasLabels(): boolean {
+  return boolEnv("PI_WEBUI_FORCE_MODEL_ALIAS_LABELS");
+}
+
+function fileStamp(filePath: string): string {
+  try {
+    const stat = fs.statSync(filePath);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return "missing";
+  }
+}
+
+function refreshModelConfigIfChanged() {
+  const nextStamp = [
+    fileStamp(path.join(AGENT_DIR, "auth.json")),
+    fileStamp(path.join(AGENT_DIR, "models.json")),
+    fileStamp(AGENT_SETTINGS_PATH),
+  ].join("|");
+  if (nextStamp === modelConfigStamp) return;
+  modelConfigStamp = nextStamp;
+  authStorage?.reload();
+  modelRegistry?.refresh();
+  syntheticModels.clear();
+}
 
 function modelToInfo(model: Model<Api>, scoped = false): ModelInfo {
   return {
@@ -117,6 +153,7 @@ function modelToInfo(model: Model<Api>, scoped = false): ModelInfo {
     id: model.id,
     name: model.name || model.id,
     scoped,
+    forceAliasLabel: forceModelAliasLabels(),
   };
 }
 
@@ -257,7 +294,7 @@ function send(ws: WebSocket, msg: ServerMessage) {
 
 function getSessionDir(cwd: string): string {
   const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-  return path.join(HOME_DIR, ".pi", "agent", "sessions", safePath);
+  return path.join(AGENT_DIR, "sessions", safePath);
 }
 
 function extractTextContent(message: any): string {
@@ -379,17 +416,17 @@ function resolveSessionPath(candidate: string): string | undefined {
 }
 
 function sessionManagerForResumePath(candidate: string | undefined): SessionManager {
-  if (!candidate) return SessionManager.create(HOME_DIR);
+  if (!candidate) return SessionManager.create(HOME_DIR, getSessionDir(HOME_DIR));
   const requestedPath = resolveSessionPath(candidate);
   if (!requestedPath) {
     console.warn("Ignoring resume path outside configured session directory");
-    return SessionManager.create(HOME_DIR);
+    return SessionManager.create(HOME_DIR, getSessionDir(HOME_DIR));
   }
   if (!fs.existsSync(requestedPath)) {
     console.warn("Ignoring missing resume session path");
-    return SessionManager.create(HOME_DIR);
+    return SessionManager.create(HOME_DIR, getSessionDir(HOME_DIR));
   }
-  return SessionManager.open(requestedPath, undefined, HOME_DIR);
+  return SessionManager.open(requestedPath, getSessionDir(HOME_DIR), HOME_DIR);
 }
 
 async function fetchLiteLLMModels(): Promise<ModelInfo[]> {
@@ -477,7 +514,26 @@ function addModelInfo(merged: ModelInfo[], seen: Set<string>, model: Model<Api>,
   merged.push(modelToInfo(model, scoped));
 }
 
+function scopedModelReferences(settings: any): string[] {
+  return [
+    process.env.PI_WEBUI_MODEL,
+    process.env.PI_MODEL,
+    settings.defaultProvider && settings.defaultModel ? `${settings.defaultProvider}/${settings.defaultModel}` : undefined,
+    ...(Array.isArray(settings.enabledModels) ? settings.enabledModels : []),
+  ].filter((reference): reference is string => typeof reference === "string" && reference.trim() !== "");
+}
+
+function scopedModelKeys(settings: any): Set<string> {
+  const keys = new Set<string>();
+  for (const reference of scopedModelReferences(settings)) {
+    const parsed = parseModelReference(reference);
+    if (parsed) keys.add(modelKey(parsed.provider, parsed.modelId));
+  }
+  return keys;
+}
+
 async function getRegistryModels(): Promise<ModelInfo[]> {
+  refreshModelConfigIfChanged();
   const settings = readAgentSettings();
   const available = await modelRegistry.getAvailable();
   const configured = available.filter((m) => modelRegistry.hasConfiguredAuth(m));
@@ -485,20 +541,14 @@ async function getRegistryModels(): Promise<ModelInfo[]> {
   const merged: ModelInfo[] = [];
   const seen = new Set<string>();
 
-  const scopedReferences = [
-    process.env.PI_WEBUI_MODEL,
-    process.env.PI_MODEL,
-    settings.defaultProvider && settings.defaultModel ? `${settings.defaultProvider}/${settings.defaultModel}` : undefined,
-    ...(Array.isArray(settings.enabledModels) ? settings.enabledModels : []),
-  ];
-
-  for (const reference of scopedReferences) {
-    if (typeof reference !== "string") continue;
+  for (const reference of scopedModelReferences(settings)) {
     const parsed = parseModelReference(reference);
     if (!parsed) continue;
     const model = findConfiguredOrSyntheticModel(parsed.provider, parsed.modelId);
     if (model) addModelInfo(merged, seen, model, true);
   }
+
+  if (restrictModelsToScoped()) return merged;
 
   for (const model of source) {
     addModelInfo(merged, seen, model);
@@ -509,6 +559,7 @@ async function getRegistryModels(): Promise<ModelInfo[]> {
 
 async function getModels(): Promise<ModelInfo[]> {
   const registryModels = await getRegistryModels();
+  if (restrictModelsToScoped()) return registryModels;
   const litellmModels = await fetchLiteLLMModels();
 
   const seen = new Set(registryModels.map((m) => modelKey(m.provider, m.id)));
@@ -530,6 +581,30 @@ function findModel(provider: string, modelId: string): Model<Api> | undefined {
 function getModelFromReference(reference: string | undefined): Model<Api> | undefined {
   const parsed = parseModelReference(reference);
   return parsed ? findConfiguredOrSyntheticModel(parsed.provider, parsed.modelId) : undefined;
+}
+
+function isModelSelectable(provider: string, modelId: string): boolean {
+  if (!restrictModelsToScoped()) return true;
+  return scopedModelKeys(readAgentSettings()).has(modelKey(provider, modelId));
+}
+
+function defaultThinkingLevelFromSettings(): any {
+  const level = readAgentSettings().defaultThinkingLevel;
+  return typeof level === "string" && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(level) ? level : "medium";
+}
+
+function applyDefaultThinkingLevel(session: AgentSession) {
+  if (session.model?.reasoning === true) {
+    session.setThinkingLevel(defaultThinkingLevelFromSettings());
+  }
+}
+
+function restorableSessionModel(sessionManager: SessionManager): Model<Api> | undefined {
+  const existingModel = sessionManager.buildSessionContext().model;
+  if (!existingModel) return undefined;
+  const model = findConfiguredOrSyntheticModel(existingModel.provider, existingModel.modelId);
+  if (!model || !isModelSelectable(model.provider, model.id)) return undefined;
+  return model;
 }
 
 function readAgentSettings(): any {
@@ -619,16 +694,22 @@ function createRequestChoiceTool(onChoiceRequest: (request: ChoiceRequest, signa
 }
 
 async function createWebUiSession(sessionManager: SessionManager, onChoiceRequest: (request: ChoiceRequest, signal?: AbortSignal) => Promise<string[]>) {
-  const initialModel = await resolveInitialWebUiModel();
+  refreshModelConfigIfChanged();
+  const restoredModel = restorableSessionModel(sessionManager);
+  const initialModel = restoredModel ? undefined : await resolveInitialWebUiModel();
+  const initialThinkingLevel = restoredModel ? undefined : defaultThinkingLevelFromSettings();
   const customTools = [createRequestChoiceTool(onChoiceRequest)];
   const result = await createAgentSession({
     cwd: HOME_DIR,
+    agentDir: AGENT_DIR,
     authStorage,
     modelRegistry,
     sessionManager,
     model: initialModel,
+    thinkingLevel: initialThinkingLevel,
     customTools,
   });
+  if (!restoredModel) applyDefaultThinkingLevel(result.session);
   result.session.setActiveToolsByName([...new Set([...result.session.getActiveToolNames(), ...customTools.map((tool) => tool.name)])]);
   return result;
 }
@@ -715,6 +796,8 @@ function isClientMessage(value: any): value is ClientMessage {
       return typeof value.level === "string";
     case "loadSession":
       return typeof value.sessionPath === "string";
+    case "renameSession":
+      return typeof value.sessionPath === "string" && typeof value.name === "string" && value.name.length <= 200;
     case "choiceResponse":
       return typeof value.requestId === "string" && value.requestId.length <= 200 && Array.isArray(value.selected) && value.selected.length <= 8 && value.selected.every((item: any) => typeof item === "string" && item.length <= 80);
     case "getMessages":
@@ -790,6 +873,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         break;
       }
       case "setModel": {
+        refreshModelConfigIfChanged();
         let model: Model<Api> | undefined;
         for (const candidate of buildModelLookupCandidates(msg.provider, msg.modelId)) {
           model = findModel(candidate.provider, candidate.modelId);
@@ -800,7 +884,12 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
           send(ws, { type: "error", message: `Model not found: ${msg.provider}/${msg.modelId}` });
           return;
         }
+        if (!isModelSelectable(model.provider, model.id)) {
+          send(ws, { type: "error", message: `Model is not enabled for this Web UI: ${model.provider}/${model.id}` });
+          return;
+        }
         await session.setModel(model);
+        applyDefaultThinkingLevel(session);
         send(ws, {
           type: "modelChanged",
           model: modelToInfo(model),
@@ -828,7 +917,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         }
 
         clearPendingChoices(ws, runtime, "Session changed");
-        const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR), (request, signal) => waitForChoiceResponse(ws, runtime.pendingChoices!, request, signal));
+        const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR, getSessionDir(HOME_DIR)), (request, signal) => waitForChoiceResponse(ws, runtime.pendingChoices!, request, signal));
         runtime.session = newSession;
         session = runtime.session;
         clearSessionListCache();
@@ -848,6 +937,27 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         send(ws, { type: "sessions", sessions: sessionPage.items, currentSessionId: session.sessionId, offset: sessionPage.offset, limit: sessionPage.limit, total: sessionPage.total, hasMore: sessionPage.hasMore, query: sessionPage.query });
         break;
       }
+      case "renameSession": {
+        const requestedPath = resolveSessionPath(msg.sessionPath);
+        if (!requestedPath || !fs.existsSync(requestedPath)) {
+          send(ws, { type: "error", message: "Session not found or outside the configured session directory" });
+          return;
+        }
+        const name = msg.name.trim().replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").slice(0, 120);
+        const currentSessionFile = session.sessionFile || "";
+        const renamingCurrent = currentSessionFile !== "" && path.resolve(requestedPath) === path.resolve(currentSessionFile);
+        if (renamingCurrent) {
+          (session as any).setSessionName(name);
+        } else {
+          const manager = SessionManager.open(requestedPath, getSessionDir(HOME_DIR), HOME_DIR);
+          manager.appendSessionInfo(name);
+        }
+        clearSessionListCache();
+        if (renamingCurrent) send(ws, { type: "stateSync", state: serializeState(session) });
+        const sessionPage = await listRecentSessions();
+        send(ws, { type: "sessions", sessions: sessionPage.items, currentSessionId: session.sessionId, offset: sessionPage.offset, limit: sessionPage.limit, total: sessionPage.total, hasMore: sessionPage.hasMore, query: sessionPage.query });
+        break;
+      }
       case "loadSession": {
         if (session.isStreaming) {
           await session.abort();
@@ -859,7 +969,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
           return;
         }
 
-        const loadedManager = SessionManager.open(requestedPath, undefined, HOME_DIR);
+        const loadedManager = SessionManager.open(requestedPath, getSessionDir(HOME_DIR), HOME_DIR);
         clearPendingChoices(ws, runtime, "Session changed");
         const { session: loadedSession } = await createWebUiSession(loadedManager, (request, signal) => waitForChoiceResponse(ws, runtime.pendingChoices!, request, signal));
         runtime.session = loadedSession;
@@ -881,8 +991,8 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
 async function main() {
   console.log("Initializing Pi agent session...");
 
-  authStorage = AuthStorage.create();
-  modelRegistry = ModelRegistry.create(authStorage);
+  authStorage = AuthStorage.create(path.join(AGENT_DIR, "auth.json"));
+  modelRegistry = ModelRegistry.create(authStorage, path.join(AGENT_DIR, "models.json"));
 
   if (!litellmKey) {
     const key = await modelRegistry.getApiKeyForProvider("ollama");

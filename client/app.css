@@ -223,26 +223,81 @@ textarea {
 
 /* Session items */
 
-.session-item {
-  display: block;
+.session-item-row {
+  display: flex;
+  align-items: stretch;
   width: 100%;
-  text-align: left;
-  padding: 10px 14px;
-  border: none;
   border-bottom: 1px solid var(--border);
-  background: transparent;
-  cursor: pointer;
-  transition: background-color 150ms ease;
   border-left: 3px solid transparent;
+  transition: background-color 150ms ease;
 }
 
-.session-item:hover {
+.session-item-row:hover {
   background: color-mix(in oklab, var(--accent) 40%, transparent);
 }
 
-.session-item.active {
+.session-item-row.active {
   background: color-mix(in oklab, var(--accent) 25%, transparent);
   border-left-color: oklch(65% 0.2 155);
+}
+
+.session-item {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  padding: 10px 10px 10px 11px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.session-action-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 150ms ease, color 150ms ease, background-color 150ms ease;
+}
+
+.session-item-row:hover .session-action-button,
+.session-action-button:focus-visible {
+  opacity: 1;
+}
+
+.session-action-button:hover {
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--accent) 50%, transparent);
+}
+
+.session-rename-form {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+  padding-left: 8px;
+}
+
+.session-rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 7px 4px 7px 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  outline: none;
+}
+
+.session-rename-input:focus {
+  border-color: color-mix(in oklab, var(--primary, oklch(65% 0.2 155)) 70%, var(--border));
 }
 
 .session-item-title {

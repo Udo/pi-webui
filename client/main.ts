@@ -3,7 +3,7 @@ import "./app.css";
 
 import { html, render, nothing } from "lit";
 import { icon } from "@mariozechner/mini-lit";
-import { ChevronDown, Plus, PanelLeftClose, Menu } from "lucide";
+import { Check, ChevronDown, Pencil, Plus, PanelLeftClose, Menu, X } from "lucide";
 
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ToolResultMessage } from "@mariozechner/pi-ai";
@@ -206,9 +206,18 @@ function formatTokensPerSecond(message: any): string | undefined {
   return `${(outputTokens / seconds).toFixed(1)} tok/s`;
 }
 
+function messageModelLabel(provider: string | undefined, modelId: string | undefined): string {
+  if (!provider || !modelId) return "";
+  const matchingModel = availableModels.find((model) => model.provider === provider && model.id === modelId);
+  if (matchingModel?.forceAliasLabel) return modelLabel(matchingModel);
+  if (currentModel?.forceAliasLabel && currentModel.provider === provider && currentModel.id === modelId) return modelLabel(currentModel);
+  return `${provider}/${modelId}`;
+}
+
 function assistantMetadata(message: any): string {
   const parts = [];
-  if (message.provider && message.model) parts.push(`${message.provider}/${message.model}`);
+  const messageModel = messageModelLabel(message.provider, message.model);
+  if (messageModel) parts.push(messageModel);
   if (message.usage) parts.push(formatUsage(message.usage));
   if (message.timestamp) parts.push(formatRelativeTime(new Date(message.timestamp).toISOString()));
   const tokensPerSecond = formatTokensPerSecond(message);
@@ -287,6 +296,8 @@ let sessionsHasMore = false;
 let sessionsOffset = 0;
 let sessionSearch = "";
 let sessionSearchTimer: number | undefined;
+let editingSessionPath: string | undefined;
+let editingSessionName = "";
 let pendingChoice: any | null = null;
 let pendingChoiceSelected = new Set<string>();
 
@@ -681,6 +692,43 @@ function handleLoadSession(sessionPath: string) {
   send({ type: "loadSession", sessionPath });
 }
 
+function startRenameSession(event: Event, session: SessionListItem) {
+  event.preventDefault();
+  event.stopPropagation();
+  editingSessionPath = session.path;
+  editingSessionName = session.name || sessionTitle(session);
+  renderApp();
+  requestAnimationFrame(() => {
+    const input = document.getElementById(`session-rename-${session.id}`) as HTMLInputElement | null;
+    input?.focus();
+    input?.select();
+  });
+}
+
+function cancelRenameSession(event?: Event) {
+  event?.preventDefault();
+  event?.stopPropagation();
+  editingSessionPath = undefined;
+  editingSessionName = "";
+  renderApp();
+}
+
+function submitRenameSession(event: Event, session: SessionListItem) {
+  event.preventDefault();
+  event.stopPropagation();
+  const name = editingSessionName.trim();
+  if (!name) return cancelRenameSession(event);
+  send({ type: "renameSession", sessionPath: session.path, name });
+  editingSessionPath = undefined;
+  editingSessionName = "";
+  renderApp();
+}
+
+function handleRenameKey(event: KeyboardEvent, session: SessionListItem) {
+  if (event.key === "Enter") submitRenameSession(event, session);
+  if (event.key === "Escape") cancelRenameSession(event);
+}
+
 document.addEventListener("click", (e) => {
   if (showModelDropdown) {
     const dropdown = document.getElementById("model-dropdown");
@@ -737,6 +785,7 @@ function sessionTitle(s: SessionListItem): string {
 }
 
 function modelLabel(model: ModelInfo): string {
+  if (model.forceAliasLabel) return model.name || model.id;
   return `${model.provider}/${model.id}`;
 }
 
@@ -783,19 +832,43 @@ function renderSidebar() {
           </div>
         ` : html`
           ${sessionList.map((s) => html`
-            <button
-              class="session-item ${s.id === currentSessionId ? 'active' : ''}"
-              @click=${() => handleLoadSession(s.path)}
-            >
-              <div class="session-item-title">${sessionTitle(s)}</div>
-              ${s.name && s.firstMessage ? html`
-                <div class="session-item-preview">${truncateText(s.firstMessage, 80)}</div>
-              ` : nothing}
-              <div class="session-item-meta">
-                <span>${s.messageCount} messages</span>
-                <span>${formatRelativeTime(s.modified)}</span>
-              </div>
-            </button>
+            <div class="session-item-row ${s.id === currentSessionId ? 'active' : ''}">
+              ${editingSessionPath === s.path ? html`
+                <form class="session-rename-form" @submit=${(event: Event) => submitRenameSession(event, s)} @click=${(event: Event) => event.stopPropagation()}>
+                  <input
+                    id="session-rename-${s.id}"
+                    class="session-rename-input"
+                    .value=${editingSessionName}
+                    maxlength="120"
+                    @input=${(event: Event) => { editingSessionName = (event.target as HTMLInputElement).value; }}
+                    @keydown=${(event: KeyboardEvent) => handleRenameKey(event, s)}
+                  />
+                  <button class="session-action-button" type="submit" title="Save name" aria-label="Save conversation name">${icon(Check, "sm")}</button>
+                  <button class="session-action-button" type="button" title="Cancel rename" aria-label="Cancel rename" @click=${cancelRenameSession}>${icon(X, "sm")}</button>
+                </form>
+              ` : html`
+                <button
+                  class="session-item"
+                  @click=${() => handleLoadSession(s.path)}
+                >
+                  <div class="session-item-title">${sessionTitle(s)}</div>
+                  ${s.name && s.firstMessage ? html`
+                    <div class="session-item-preview">${truncateText(s.firstMessage, 80)}</div>
+                  ` : nothing}
+                  <div class="session-item-meta">
+                    <span>${s.messageCount} messages</span>
+                    <span>${formatRelativeTime(s.modified)}</span>
+                  </div>
+                </button>
+                <button
+                  class="session-action-button"
+                  type="button"
+                  title="Rename conversation"
+                  aria-label="Rename conversation ${sessionTitle(s)}"
+                  @click=${(event: Event) => startRenameSession(event, s)}
+                >${icon(Pencil, "sm")}</button>
+              `}
+            </div>
           `)}
           ${sessionsLoadingMore ? html`<div class="sidebar-empty sidebar-loading-more">Loading more...</div>` : nothing}
           ${sessionsHasMore && !sessionsLoadingMore ? html`<button class="sidebar-load-more" type="button" @click=${() => requestSessions(false)}>Load more</button>` : nothing}
