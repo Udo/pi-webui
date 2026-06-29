@@ -33,7 +33,7 @@ npm run build
 |---|---|---|
 | `PORT` | `3001` | Server listen port |
 | `HOST` | `127.0.0.1` | Server listen address. Use `0.0.0.0` only on a trusted network and with `PI_WEBUI_TOKEN` set. |
-| `PI_WEBUI_TOKEN` | *(unset)* | Optional shared secret for `/api/ws`. If set, open `/?token=<token>` once; the client stores it in local storage for reconnects. Query-string tokens can appear in browser/proxy logs and are readable by page JavaScript, so use only on trusted local networks. If unset, access relies on WebSocket Origin checks. |
+| `PI_WEBUI_TOKEN` | *(unset)* | Optional shared secret for `/api/ws`. If set, open `/?token=<token>` once; the client stores it in local storage for reconnects and removes `token` from the visible URL. Query-string tokens may still appear in browser/proxy logs for the initial request and are readable by page JavaScript before removal, so use only on trusted local networks. If unset, access relies on WebSocket Origin checks. |
 | `PI_WEBUI_ALLOWED_ORIGINS` | same host as request | Optional comma-separated extra WebSocket `Origin` allowlist. |
 | `SESSION_LIST_LIMIT` | `30` | Default sessions fetched per sidebar page. |
 | `SESSION_LIST_MAX_LIMIT` | `100` | Maximum sessions accepted per sidebar page request. |

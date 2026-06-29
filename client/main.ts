@@ -294,11 +294,22 @@ let pendingChoiceSelected = new Set<string>();
 
 function getWebUiToken(): string {
   const params = new URLSearchParams(location.search);
-  const token = params.get("token") || localStorage.getItem("pi-webui-token") || "";
+  const queryToken = params.get("token") || "";
+  const token = queryToken || localStorage.getItem("pi-webui-token") || "";
   if (token) {
     localStorage.setItem("pi-webui-token", token);
   }
+  if (queryToken) {
+    removeTokenFromLocation(params);
+  }
   return token;
+}
+
+function removeTokenFromLocation(params: URLSearchParams) {
+  params.delete("token");
+  const query = params.toString();
+  const nextUrl = `${location.pathname}${query ? `?${query}` : ""}${location.hash}`;
+  history.replaceState(history.state, "", nextUrl);
 }
 
 function getWsUrl(): string {
