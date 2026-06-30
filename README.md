@@ -33,7 +33,7 @@ npm run build
 |---|---|---|
 | `PORT` | `3001` | Server listen port |
 | `HOST` | `127.0.0.1` | Server listen address. Use `0.0.0.0` only on a trusted network and with `PI_WEBUI_TOKEN` set. |
-| `PI_WEBUI_TOKEN` | *(unset)* | Optional shared secret for `/api/ws`. If set, open `/?token=<token>` once; the client stores it in local storage for reconnects and removes `token` from the visible URL. Query-string tokens may still appear in browser/proxy logs for the initial request and are readable by page JavaScript before removal, so use only on trusted local networks. If unset, access relies on WebSocket Origin checks. |
+| `PI_WEBUI_TOKEN` | *(unset)* | Optional shared secret for `/api/ws`. If set, open `/?token=<token>` once; the client stores it in local storage for reconnects, removes `token` from the visible URL, and sends later WebSocket auth through a `Sec-WebSocket-Protocol` value instead of the request URL. Query-string tokens may still appear in browser/proxy logs for the initial page load and are readable by page JavaScript before removal, so use only on trusted local networks. If unset, access relies on WebSocket Origin checks. |
 | `PI_WEBUI_ALLOWED_ORIGINS` | same host as request | Optional comma-separated extra WebSocket `Origin` allowlist. |
 | `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Pi agent config directory for auth, models, settings, and sessions. |
 | `PI_WEBUI_RESTRICT_MODELS_TO_SCOPED` | *(unset)* | If true/yes/on/1, only models from `PI_WEBUI_MODEL`, `PI_MODEL`, `settings.defaultProvider/defaultModel`, or `settings.enabledModels` are listed/selectable. |

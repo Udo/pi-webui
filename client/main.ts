@@ -325,17 +325,24 @@ function removeTokenFromLocation(params: URLSearchParams) {
 
 function getWsUrl(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const token = getWebUiToken();
   const lastPath = localStorage.getItem("pi-webui-session-path") || "";
   const params = new URLSearchParams();
-  if (token) params.set("token", token);
   if (lastPath) params.set("sessionPath", lastPath);
   const query = params.toString() ? `?${params.toString()}` : "";
   return `${proto}//${location.host}/api/ws${query}`;
 }
 
+function webSocketProtocols(token: string): string[] {
+  if (!token) return [];
+  const bytes = new TextEncoder().encode(token);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return [`pi-webui-token.${encoded}`];
+}
+
 function connectWs() {
-  ws = new WebSocket(getWsUrl());
+  ws = new WebSocket(getWsUrl(), webSocketProtocols(getWebUiToken()));
 
   ws.onopen = () => {
     connected = true;

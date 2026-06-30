@@ -65,14 +65,32 @@ function isValidToken(candidate: string | undefined): boolean {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
+function tokenFromWebSocketProtocol(header: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(header) ? header.join(",") : header;
+  if (!raw) return undefined;
+  for (const item of raw.split(",")) {
+    const protocol = item.trim();
+    if (!protocol.startsWith("pi-webui-token.")) continue;
+    const encoded = protocol.slice("pi-webui-token.".length);
+    if (!encoded) continue;
+    try {
+      return Buffer.from(encoded, "base64url").toString("utf8");
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 const wss = new WebSocketServer({
   server,
   path: "/api/ws",
   maxPayload: 1024 * 1024,
   verifyClient: (info, done) => {
     const originOk = isAllowedWsOrigin(info.origin, info.req.headers.host);
-    const token = new URL(info.req.url || "/", "http://localhost").searchParams.get("token") || undefined;
-    const tokenOk = isValidToken(token);
+    const urlToken = new URL(info.req.url || "/", "http://localhost").searchParams.get("token") || undefined;
+    const protocolToken = tokenFromWebSocketProtocol(info.req.headers["sec-websocket-protocol"]);
+    const tokenOk = isValidToken(protocolToken || urlToken);
     done(originOk && tokenOk, originOk ? 401 : 403, originOk ? "Unauthorized" : "Forbidden");
   },
 });
