@@ -1,5 +1,5 @@
 import express from "express";
-import { timingSafeEqual } from "crypto";
+import { createHash, timingSafeEqual } from "crypto";
 import { createServer } from "http";
 import fs from "fs";
 import os from "os";
@@ -12,6 +12,8 @@ import {
   ModelRegistry,
   SessionManager,
   defineTool,
+  DefaultResourceLoader,
+  SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
@@ -101,7 +103,8 @@ app.use(express.json({ limit: "256kb" }));
 const HOME_DIR = os.homedir();
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(HOME_DIR, ".pi", "agent");
 const AGENT_SETTINGS_PATH = path.join(AGENT_DIR, "settings.json");
-const EDITABLE_SKILLS_DIR = path.join(AGENT_DIR, "skills");
+const USER_SKILLS_DIR = process.env.PI_WEBUI_USER_SKILLS_DIR || path.join(HOME_DIR, ".pi", "skills");
+const SHARED_SKILLS_DIR = process.env.PI_WEBUI_SHARED_SKILLS_DIR || path.join(AGENT_DIR, "skills");
 const SESSION_LIST_LIMIT = parseIntEnv("SESSION_LIST_LIMIT", 30);
 const SESSION_LIST_MAX_LIMIT = parseIntEnv("SESSION_LIST_MAX_LIMIT", 100);
 const MESSAGE_PAGE_LIMIT = parseIntEnv("MESSAGE_PAGE_LIMIT", 60);
@@ -140,11 +143,14 @@ function forceModelAliasLabels(): boolean {
   return boolEnv("PI_WEBUI_FORCE_MODEL_ALIAS_LABELS");
 }
 
+type SkillSource = "user" | "shared";
+
 type SkillListItem = {
   id: string;
   name: string;
   description: string;
   path: string;
+  source: SkillSource;
   editable: boolean;
   diagnostics: string[];
 };
@@ -192,23 +198,23 @@ function parseSkillFrontmatter(content: string): { fields: Record<string, string
   return { fields, diagnostics };
 }
 
-async function readSkillFile(filePath: string): Promise<SkillListItem | undefined> {
+async function readSkillFile(filePath: string, source: SkillSource, editable: boolean): Promise<SkillListItem | undefined> {
   const content = await fs.promises.readFile(filePath, "utf8").catch(() => "");
   if (!content) return undefined;
   const { fields, diagnostics } = parseSkillFrontmatter(content);
   if (!fields.description) return undefined;
   const folderName = path.basename(path.dirname(filePath));
   const name = fields.name || folderName;
-  const id = isValidSkillName(name) ? name : folderName;
-  return { id, name, description: fields.description || "", path: filePath, editable: true, diagnostics };
+  const id = source === "user" && isValidSkillName(name) ? name : createHash("sha256").update(path.resolve(filePath)).digest("hex").slice(0, 16);
+  return { id, name, description: fields.description || "", path: filePath, source, editable, diagnostics };
 }
 
-async function collectEditableSkills(): Promise<SkillListItem[]> {
+async function collectSkillsFromRoot(root: string, source: SkillSource, editable: boolean): Promise<SkillListItem[]> {
   const out: SkillListItem[] = [];
   const visit = async (dir: string, allowRootFiles: boolean) => {
     const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
     if (entries.some((entry) => entry.isFile() && entry.name === "SKILL.md")) {
-      const item = await readSkillFile(path.join(dir, "SKILL.md"));
+      const item = await readSkillFile(path.join(dir, "SKILL.md"), source, editable);
       if (item) out.push(item);
       return;
     }
@@ -217,18 +223,27 @@ async function collectEditableSkills(): Promise<SkillListItem[]> {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) await visit(fullPath, false);
       else if (allowRootFiles && entry.isFile() && entry.name.endsWith(".md")) {
-        const item = await readSkillFile(fullPath);
+        const item = await readSkillFile(fullPath, source, editable);
         if (item) out.push(item);
       }
     }
   };
-  await visit(EDITABLE_SKILLS_DIR, true);
+  await visit(root, true);
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function editableSkillPath(name: string): string | undefined {
+async function listSkills(): Promise<SkillListItem[]> {
+  const [userSkills, sharedSkills] = await Promise.all([
+    collectSkillsFromRoot(USER_SKILLS_DIR, "user", true),
+    collectSkillsFromRoot(SHARED_SKILLS_DIR, "shared", false),
+  ]);
+  const userNames = new Set(userSkills.map((skill) => skill.name));
+  return [...userSkills, ...sharedSkills.filter((skill) => !userNames.has(skill.name))];
+}
+
+function userSkillPath(name: string): string | undefined {
   if (!isValidSkillName(name)) return undefined;
-  const root = path.resolve(EDITABLE_SKILLS_DIR);
+  const root = path.resolve(USER_SKILLS_DIR);
   const skillFile = path.resolve(root, name, "SKILL.md");
   if (!skillFile.startsWith(`${root}${path.sep}`)) return undefined;
   return skillFile;
@@ -239,6 +254,15 @@ async function writeSkillAtomic(skillFile: string, content: string) {
   const tmp = `${skillFile}.${process.pid}.${Date.now()}.tmp`;
   await fs.promises.writeFile(tmp, content, { mode: 0o600 });
   await fs.promises.rename(tmp, skillFile);
+}
+
+async function getSkillContent(source: string, id: string): Promise<{ item: SkillListItem; content: string } | undefined> {
+  if (source !== "user" && source !== "shared") return undefined;
+  const skills = await listSkills();
+  const item = skills.find((skill) => skill.source === source && skill.id === id);
+  if (!item) return undefined;
+  const content = await fs.promises.readFile(item.path, "utf8");
+  return { item, content };
 }
 
 function tokenFromRequest(req: express.Request): string | undefined {
@@ -826,6 +850,14 @@ async function createWebUiSession(sessionManager: SessionManager, onChoiceReques
   const initialModel = restoredModel ? undefined : await resolveInitialWebUiModel();
   const initialThinkingLevel = restoredModel ? undefined : defaultThinkingLevelFromSettings();
   const customTools = [createRequestChoiceTool(onChoiceRequest)];
+  const settingsManager = SettingsManager.create(HOME_DIR, AGENT_DIR);
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: HOME_DIR,
+    agentDir: AGENT_DIR,
+    settingsManager,
+    additionalSkillPaths: [USER_SKILLS_DIR, SHARED_SKILLS_DIR],
+  });
+  await resourceLoader.reload();
   const result = await createAgentSession({
     cwd: HOME_DIR,
     agentDir: AGENT_DIR,
@@ -835,6 +867,8 @@ async function createWebUiSession(sessionManager: SessionManager, onChoiceReques
     model: initialModel,
     thinkingLevel: initialThinkingLevel,
     customTools,
+    settingsManager,
+    resourceLoader,
   });
   if (!restoredModel) applyDefaultThinkingLevel(result.session);
   result.session.setActiveToolsByName([...new Set([...result.session.getActiveToolNames(), ...customTools.map((tool) => tool.name)])]);
@@ -1116,17 +1150,20 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
 }
 
 app.get("/api/skills", requireEditAuth, async (_req, res) => {
-  const skills = await collectEditableSkills();
-  res.json({ ok: true, root: EDITABLE_SKILLS_DIR, skills });
+  const skills = await listSkills();
+  res.json({
+    ok: true,
+    userRoot: USER_SKILLS_DIR,
+    sharedRoot: SHARED_SKILLS_DIR,
+    skills: skills.map((skill) => ({ ...skill, path: skill.editable ? skill.path : undefined })),
+  });
 });
 
-app.get("/api/skills/:id", requireEditAuth, async (req, res) => {
-  const id = String(req.params.id || "").trim();
-  const skillFile = editableSkillPath(id);
-  if (!skillFile || !fs.existsSync(skillFile)) return res.status(404).json({ ok: false, error: "not_found" });
-  const item = await readSkillFile(skillFile);
-  const content = await fs.promises.readFile(skillFile, "utf8");
-  res.json({ ok: true, skill: item, content });
+app.get("/api/skills/:source/:id", requireEditAuth, async (req, res) => {
+  const result = await getSkillContent(String(req.params.source || ""), String(req.params.id || ""));
+  if (!result) return res.status(404).json({ ok: false, error: "not_found" });
+  const publicItem = result.item.editable ? result.item : { ...result.item, path: undefined };
+  res.json({ ok: true, skill: publicItem, content: result.content });
 });
 
 app.post("/api/skills", requireEditAuth, async (req, res) => {
@@ -1134,17 +1171,17 @@ app.post("/api/skills", requireEditAuth, async (req, res) => {
   const description = normalizeSkillDescription(String(req.body?.description || ""));
   if (!isValidSkillName(name)) return res.status(400).json({ ok: false, error: "invalid_name", message: "Use lowercase letters, numbers, and single hyphens only." });
   if (!description || description.length > 1024) return res.status(400).json({ ok: false, error: "invalid_description", message: "Description is required and must be at most 1024 characters." });
-  const skillFile = editableSkillPath(name);
+  const skillFile = userSkillPath(name);
   if (!skillFile) return res.status(400).json({ ok: false, error: "invalid_name" });
   if (fs.existsSync(skillFile)) return res.status(409).json({ ok: false, error: "already_exists" });
   const escapedDescription = description.replaceAll('"', "'");
   const content = `---\nname: ${name}\ndescription: "${escapedDescription}"\n---\n\n# ${name}\n\n## When to use\n\n${description}\n\n## Instructions\n\n- Describe the workflow this skill should guide.\n- Add any setup, commands, references, or safety constraints the agent should follow.\n`;
   await writeSkillAtomic(skillFile, content);
-  const item = await readSkillFile(skillFile);
+  const item = await readSkillFile(skillFile, "user", true);
   res.json({ ok: true, skill: item, content, note: "Start a new session or reload the current one for Pi to advertise new/changed skills." });
 });
 
-app.put("/api/skills/:id", requireEditAuth, async (req, res) => {
+app.put("/api/skills/user/:id", requireEditAuth, async (req, res) => {
   const id = String(req.params.id || "").trim();
   const content = String(req.body?.content || "");
   if (!isValidSkillName(id)) return res.status(400).json({ ok: false, error: "invalid_name" });
@@ -1152,16 +1189,16 @@ app.put("/api/skills/:id", requireEditAuth, async (req, res) => {
   const parsed = parseSkillFrontmatter(content);
   if (parsed.diagnostics.length > 0) return res.status(400).json({ ok: false, error: "invalid_skill", diagnostics: parsed.diagnostics });
   if (parsed.fields.name !== id) return res.status(400).json({ ok: false, error: "name_mismatch", message: "The frontmatter name must match the skill being edited. Create a new skill to rename." });
-  const skillFile = editableSkillPath(id);
+  const skillFile = userSkillPath(id);
   if (!skillFile || !fs.existsSync(skillFile)) return res.status(404).json({ ok: false, error: "not_found" });
   await writeSkillAtomic(skillFile, content);
-  const item = await readSkillFile(skillFile);
+  const item = await readSkillFile(skillFile, "user", true);
   res.json({ ok: true, skill: item, note: "Start a new session or reload the current one for Pi to advertise new/changed skills." });
 });
 
-app.delete("/api/skills/:id", requireEditAuth, async (req, res) => {
+app.delete("/api/skills/user/:id", requireEditAuth, async (req, res) => {
   const id = String(req.params.id || "").trim();
-  const skillFile = editableSkillPath(id);
+  const skillFile = userSkillPath(id);
   if (!skillFile || !fs.existsSync(skillFile)) return res.status(404).json({ ok: false, error: "not_found" });
   await fs.promises.rm(path.dirname(skillFile), { recursive: true, force: true });
   res.json({ ok: true, note: "Deleted. Start a new session or reload the current one to remove it from advertised skills." });

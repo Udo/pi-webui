@@ -941,6 +941,7 @@ type SkillListItem = {
   id: string;
   name: string;
   description: string;
+  source: "user" | "shared";
   editable: boolean;
   diagnostics?: string[];
 };
@@ -950,7 +951,7 @@ let skillsSaving = false;
 let skillsMessage = "";
 let skillsError = "";
 let skillItems: SkillListItem[] = [];
-let selectedSkillId = "";
+let selectedSkillKey = "";
 let selectedSkill: SkillListItem | undefined;
 let selectedSkillContent = "";
 let newSkillName = "";
@@ -968,18 +969,22 @@ async function fetchSkillJson(url: string, options: RequestInit = {}) {
   return data;
 }
 
-async function loadSkills(selectId = selectedSkillId) {
+function skillKey(skill: SkillListItem): string {
+  return `${skill.source}:${skill.id}`;
+}
+
+async function loadSkills(selectKey = selectedSkillKey) {
   skillsLoading = true;
   skillsError = "";
   renderSkillsManagerApp();
   try {
     const data = await fetchSkillJson("/api/skills");
     skillItems = data.skills || [];
-    const next = skillItems.find((skill) => skill.id === selectId) || skillItems[0];
+    const next = skillItems.find((skill) => skillKey(skill) === selectKey) || skillItems[0];
     if (next) await selectSkill(next);
     else {
       selectedSkill = undefined;
-      selectedSkillId = "";
+      selectedSkillKey = "";
       selectedSkillContent = "";
     }
   } catch (err) {
@@ -992,12 +997,12 @@ async function loadSkills(selectId = selectedSkillId) {
 
 async function selectSkill(skill: SkillListItem) {
   selectedSkill = skill;
-  selectedSkillId = skill.id;
+  selectedSkillKey = skillKey(skill);
   selectedSkillContent = "";
   skillsError = "";
   renderSkillsManagerApp();
   try {
-    const data = await fetchSkillJson(`/api/skills/${encodeURIComponent(skill.id)}`);
+    const data = await fetchSkillJson(`/api/skills/${encodeURIComponent(skill.source)}/${encodeURIComponent(skill.id)}`);
     selectedSkill = data.skill;
     selectedSkillContent = data.content || "";
   } catch (err) {
@@ -1017,7 +1022,7 @@ async function createSkill(event: Event) {
     newSkillName = "";
     newSkillDescription = "";
     skillsMessage = data.note || "Skill created.";
-    await loadSkills(data.skill?.id || "");
+    await loadSkills(data.skill ? skillKey(data.skill) : "");
   } catch (err) {
     skillsError = err instanceof Error ? err.message : String(err);
   } finally {
@@ -1033,9 +1038,9 @@ async function saveSelectedSkill() {
   skillsMessage = "";
   renderSkillsManagerApp();
   try {
-    const data = await fetchSkillJson(`/api/skills/${encodeURIComponent(selectedSkill.id)}`, { method: "PUT", body: JSON.stringify({ content: selectedSkillContent }) });
+    const data = await fetchSkillJson(`/api/skills/user/${encodeURIComponent(selectedSkill.id)}`, { method: "PUT", body: JSON.stringify({ content: selectedSkillContent }) });
     skillsMessage = data.note || "Skill saved.";
-    await loadSkills(selectedSkill.id);
+    await loadSkills(skillKey(selectedSkill));
   } catch (err) {
     skillsError = err instanceof Error ? err.message : String(err);
   } finally {
@@ -1052,9 +1057,9 @@ async function deleteSelectedSkill() {
   skillsMessage = "";
   renderSkillsManagerApp();
   try {
-    const data = await fetchSkillJson(`/api/skills/${encodeURIComponent(selectedSkill.id)}`, { method: "DELETE" });
+    const data = await fetchSkillJson(`/api/skills/user/${encodeURIComponent(selectedSkill.id)}`, { method: "DELETE" });
     skillsMessage = data.note || "Skill deleted.";
-    selectedSkillId = "";
+    selectedSkillKey = "";
     await loadSkills("");
   } catch (err) {
     skillsError = err instanceof Error ? err.message : String(err);
@@ -1065,8 +1070,9 @@ async function deleteSelectedSkill() {
 }
 
 function renderSkillListButton(skill: SkillListItem) {
+  const key = skillKey(skill);
   return html`
-    <button class="skills-list-item ${skill.id === selectedSkillId ? "active" : ""}" type="button" @click=${() => selectSkill(skill)}>
+    <button class="skills-list-item ${key === selectedSkillKey ? "active" : ""}" type="button" @click=${() => selectSkill(skill)}>
       <span>${skill.name}</span>
       <small>${skill.description}</small>
     </button>
@@ -1076,26 +1082,32 @@ function renderSkillListButton(skill: SkillListItem) {
 function renderSkillsManagerApp() {
   const app = document.getElementById("app");
   if (!app) return;
+  const userSkills = skillItems.filter((skill) => skill.source === "user");
+  const sharedSkills = skillItems.filter((skill) => skill.source === "shared");
   render(html`
     <div class="skills-page">
       <header class="skills-header">
         <div>
           <h1>Skills Manager</h1>
-          <p>Create and edit Pi skills stored under your agent directory.</p>
+          <p>Create and edit private skills. Shared skills are available to everyone and are read-only here.</p>
         </div>
         <a href="/">Back to chat</a>
       </header>
       <main class="skills-layout">
         <aside class="skills-sidebar">
           <form class="skills-create" @submit=${createSkill}>
-            <h2>New skill</h2>
+            <h2>New private skill</h2>
             <input placeholder="skill-name" pattern="[a-z0-9-]+" .value=${newSkillName} @input=${(e: Event) => { newSkillName = (e.target as HTMLInputElement).value; }} />
             <textarea rows="3" placeholder="When should the agent use this skill?" .value=${newSkillDescription} @input=${(e: Event) => { newSkillDescription = (e.target as HTMLTextAreaElement).value; }}></textarea>
             <button type="submit" ?disabled=${skillsSaving}>Create skill</button>
           </form>
           <section class="skills-list-section">
-            <h2>Skills</h2>
-            ${skillsLoading ? html`<p class="skills-muted">Loading...</p>` : skillItems.length ? skillItems.map((skill) => renderSkillListButton(skill)) : html`<p class="skills-muted">No skills yet.</p>`}
+            <h2>Your skills</h2>
+            ${skillsLoading ? html`<p class="skills-muted">Loading...</p>` : userSkills.length ? userSkills.map((skill) => renderSkillListButton(skill)) : html`<p class="skills-muted">No private skills yet.</p>`}
+          </section>
+          <section class="skills-list-section">
+            <h2>Shared skills</h2>
+            ${sharedSkills.length ? sharedSkills.map((skill) => renderSkillListButton(skill)) : html`<p class="skills-muted">No shared skills found.</p>`}
           </section>
         </aside>
         <section class="skills-editor-panel">
@@ -1109,16 +1121,18 @@ function renderSkillsManagerApp() {
                 ${selectedSkill.diagnostics?.length ? html`<p class="skills-diagnostics">${selectedSkill.diagnostics.join("; ")}</p>` : nothing}
               </div>
               <div class="skills-editor-actions">
-                <button type="button" @click=${saveSelectedSkill} ?disabled=${skillsSaving}>Save</button>
-                <button class="danger" type="button" @click=${deleteSelectedSkill} ?disabled=${skillsSaving}>Delete</button>
+                ${selectedSkill.editable ? html`
+                  <button type="button" @click=${saveSelectedSkill} ?disabled=${skillsSaving}>Save</button>
+                  <button class="danger" type="button" @click=${deleteSelectedSkill} ?disabled=${skillsSaving}>Delete</button>
+                ` : html`<span class="skills-readonly-pill">Read-only shared skill</span>`}
               </div>
             </div>
-            <textarea class="skills-editor" spellcheck="false" .value=${selectedSkillContent} @input=${(e: Event) => { selectedSkillContent = (e.target as HTMLTextAreaElement).value; }}></textarea>
-            <p class="skills-help">Skill changes are picked up by new/reloaded Pi sessions. Skills can strongly steer agent behavior, so review instructions before saving.</p>
+            <textarea class="skills-editor" spellcheck="false" ?readonly=${!selectedSkill.editable} .value=${selectedSkillContent} @input=${(e: Event) => { selectedSkillContent = (e.target as HTMLTextAreaElement).value; }}></textarea>
+            <p class="skills-help">Skill changes are picked up by new/reloaded Pi sessions. Private skills with the same name as shared skills take precedence.</p>
           ` : html`
             <div class="skills-empty-editor">
               <h2>Select or create a skill</h2>
-              <p>Skills are stored under the current Pi agent directory in <code>skills/&lt;skill-name&gt;/SKILL.md</code>.</p>
+              <p>Private skills are stored under <code>~/.pi/skills/&lt;skill-name&gt;/SKILL.md</code>. Shared skills are loaded from the configured shared skills directory.</p>
             </div>
           `}
         </section>

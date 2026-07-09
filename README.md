@@ -35,7 +35,9 @@ npm run build
 | `HOST` | `127.0.0.1` | Server listen address. Use `0.0.0.0` only on a trusted network and with `PI_WEBUI_TOKEN` set. |
 | `PI_WEBUI_TOKEN` | *(unset)* | Optional shared secret for `/api/ws` and the skills editor API. If set, open `/?token=<token>` once; the client stores it in local storage for reconnects, removes `token` from the visible URL, and sends later WebSocket/authenticated API requests without keeping the token in the visible URL. Query-string tokens may still appear in browser/proxy logs for the initial page load and are readable by page JavaScript before removal, so use only on trusted local networks. If unset, WebSocket access relies on Origin checks and local/trusted hosting. |
 | `PI_WEBUI_ALLOWED_ORIGINS` | same host as request | Optional comma-separated extra WebSocket `Origin` allowlist. |
-| `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Pi agent config directory for auth, models, settings, and sessions. |
+| `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Pi agent config directory for auth, models, settings, sessions, and shared skills. |
+| `PI_WEBUI_USER_SKILLS_DIR` | `~/.pi/skills` | Private skills edited from `/skills`. With the default working directory this is loaded by Pi as a project-local skills directory. |
+| `PI_WEBUI_SHARED_SKILLS_DIR` | `$PI_CODING_AGENT_DIR/skills` | Shared read-only skills listed in `/skills` and available to all agents using this agent dir. |
 | `PI_WEBUI_RESTRICT_MODELS_TO_SCOPED` | *(unset)* | If true/yes/on/1, only models from `PI_WEBUI_MODEL`, `PI_MODEL`, `settings.defaultProvider/defaultModel`, or `settings.enabledModels` are listed/selectable. |
 | `PI_WEBUI_FORCE_MODEL_ALIAS_LABELS` | *(unset)* | If true/yes/on/1, show configured model aliases (`name`) instead of raw provider/model ids in the UI and response metadata. |
 | `SESSION_LIST_LIMIT` | `30` | Default sessions fetched per sidebar page. |
@@ -70,7 +72,7 @@ HOST=127.0.0.1 PORT=8085 PI_WEBUI_TOKEN=change-me npm start
 - Optional scoped-only model selection and alias-only model labels
 - Configurable thinking level (off, minimal, low, medium, high), with saved session model/thinking restored on resume
 - Streaming responses with tool execution display and paged conversation loading for long histories
-- Built-in skills manager at `/skills` for creating/editing skills under `~/.pi/agent/skills`
+- Built-in skills manager at `/skills` for creating/editing private skills under `~/.pi/skills` and viewing shared read-only skills from `$PI_CODING_AGENT_DIR/skills`; private skills with the same name take precedence
 - Collapsible session sidebar (inline on desktop, overlay on mobile) plus a mobile top-bar controls menu
 - Dark/light theme toggle with green accent
 

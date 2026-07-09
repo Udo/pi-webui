@@ -720,6 +720,16 @@ textarea {
   justify-content: flex-end;
 }
 
+.skills-readonly-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--app-space-2) var(--app-space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
 .skills-editor {
   width: 100%;
   flex: 1;
@@ -727,6 +737,11 @@ textarea {
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace !important;
   white-space: pre;
   resize: none;
+}
+
+.skills-editor[readonly] {
+  opacity: 0.82;
+  cursor: default;
 }
 
 .skills-alert {
