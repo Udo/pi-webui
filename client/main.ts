@@ -289,6 +289,7 @@ let currentSessionName: string | undefined;
 let currentSessionPath: string | undefined;
 let errorClearTimer: number | undefined;
 let sidebarOpen = false;
+let showMobileControls = false;
 let sessionList: SessionListItem[] = [];
 let sessionsLoading = false;
 let sessionsLoadingMore = false;
@@ -630,6 +631,7 @@ function handleAbort() {
 function handleModelSelect(model: ModelInfo) {
   send({ type: "setModel", provider: model.provider, modelId: model.id });
   showModelDropdown = false;
+  showMobileControls = false;
   renderApp();
 }
 
@@ -691,6 +693,12 @@ function toggleSidebar() {
 
 function closeSidebar() {
   sidebarOpen = false;
+  renderApp();
+}
+
+function toggleMobileControls() {
+  showMobileControls = !showMobileControls;
+  if (!showMobileControls) showModelDropdown = false;
   renderApp();
 }
 
@@ -927,6 +935,198 @@ function renderChoiceRequest() {
   `;
 }
 
+// ── Skills manager route ──
+
+type SkillListItem = {
+  id: string;
+  name: string;
+  description: string;
+  editable: boolean;
+  diagnostics?: string[];
+};
+
+let skillsLoading = false;
+let skillsSaving = false;
+let skillsMessage = "";
+let skillsError = "";
+let skillItems: SkillListItem[] = [];
+let selectedSkillId = "";
+let selectedSkill: SkillListItem | undefined;
+let selectedSkillContent = "";
+let newSkillName = "";
+let newSkillDescription = "";
+
+function skillAuthHeaders(): Record<string, string> {
+  const token = getWebUiToken();
+  return token ? { "X-PI-WEBUI-Token": token } : {};
+}
+
+async function fetchSkillJson(url: string, options: RequestInit = {}) {
+  const response = await fetch(url, { headers: { "Content-Type": "application/json", ...skillAuthHeaders(), ...(options.headers || {}) }, ...options });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) throw new Error(data.message || data.error || `Request failed with HTTP ${response.status}`);
+  return data;
+}
+
+async function loadSkills(selectId = selectedSkillId) {
+  skillsLoading = true;
+  skillsError = "";
+  renderSkillsManagerApp();
+  try {
+    const data = await fetchSkillJson("/api/skills");
+    skillItems = data.skills || [];
+    const next = skillItems.find((skill) => skill.id === selectId) || skillItems[0];
+    if (next) await selectSkill(next);
+    else {
+      selectedSkill = undefined;
+      selectedSkillId = "";
+      selectedSkillContent = "";
+    }
+  } catch (err) {
+    skillsError = err instanceof Error ? err.message : String(err);
+  } finally {
+    skillsLoading = false;
+    renderSkillsManagerApp();
+  }
+}
+
+async function selectSkill(skill: SkillListItem) {
+  selectedSkill = skill;
+  selectedSkillId = skill.id;
+  selectedSkillContent = "";
+  skillsError = "";
+  renderSkillsManagerApp();
+  try {
+    const data = await fetchSkillJson(`/api/skills/${encodeURIComponent(skill.id)}`);
+    selectedSkill = data.skill;
+    selectedSkillContent = data.content || "";
+  } catch (err) {
+    skillsError = err instanceof Error ? err.message : String(err);
+  }
+  renderSkillsManagerApp();
+}
+
+async function createSkill(event: Event) {
+  event.preventDefault();
+  skillsSaving = true;
+  skillsError = "";
+  skillsMessage = "";
+  renderSkillsManagerApp();
+  try {
+    const data = await fetchSkillJson("/api/skills", { method: "POST", body: JSON.stringify({ name: newSkillName, description: newSkillDescription }) });
+    newSkillName = "";
+    newSkillDescription = "";
+    skillsMessage = data.note || "Skill created.";
+    await loadSkills(data.skill?.id || "");
+  } catch (err) {
+    skillsError = err instanceof Error ? err.message : String(err);
+  } finally {
+    skillsSaving = false;
+    renderSkillsManagerApp();
+  }
+}
+
+async function saveSelectedSkill() {
+  if (!selectedSkill?.editable) return;
+  skillsSaving = true;
+  skillsError = "";
+  skillsMessage = "";
+  renderSkillsManagerApp();
+  try {
+    const data = await fetchSkillJson(`/api/skills/${encodeURIComponent(selectedSkill.id)}`, { method: "PUT", body: JSON.stringify({ content: selectedSkillContent }) });
+    skillsMessage = data.note || "Skill saved.";
+    await loadSkills(selectedSkill.id);
+  } catch (err) {
+    skillsError = err instanceof Error ? err.message : String(err);
+  } finally {
+    skillsSaving = false;
+    renderSkillsManagerApp();
+  }
+}
+
+async function deleteSelectedSkill() {
+  if (!selectedSkill?.editable) return;
+  if (!confirm(`Delete skill ${selectedSkill.name}?`)) return;
+  skillsSaving = true;
+  skillsError = "";
+  skillsMessage = "";
+  renderSkillsManagerApp();
+  try {
+    const data = await fetchSkillJson(`/api/skills/${encodeURIComponent(selectedSkill.id)}`, { method: "DELETE" });
+    skillsMessage = data.note || "Skill deleted.";
+    selectedSkillId = "";
+    await loadSkills("");
+  } catch (err) {
+    skillsError = err instanceof Error ? err.message : String(err);
+  } finally {
+    skillsSaving = false;
+    renderSkillsManagerApp();
+  }
+}
+
+function renderSkillListButton(skill: SkillListItem) {
+  return html`
+    <button class="skills-list-item ${skill.id === selectedSkillId ? "active" : ""}" type="button" @click=${() => selectSkill(skill)}>
+      <span>${skill.name}</span>
+      <small>${skill.description}</small>
+    </button>
+  `;
+}
+
+function renderSkillsManagerApp() {
+  const app = document.getElementById("app");
+  if (!app) return;
+  render(html`
+    <div class="skills-page">
+      <header class="skills-header">
+        <div>
+          <h1>Skills Manager</h1>
+          <p>Create and edit Pi skills stored under your agent directory.</p>
+        </div>
+        <a href="/">Back to chat</a>
+      </header>
+      <main class="skills-layout">
+        <aside class="skills-sidebar">
+          <form class="skills-create" @submit=${createSkill}>
+            <h2>New skill</h2>
+            <input placeholder="skill-name" pattern="[a-z0-9-]+" .value=${newSkillName} @input=${(e: Event) => { newSkillName = (e.target as HTMLInputElement).value; }} />
+            <textarea rows="3" placeholder="When should the agent use this skill?" .value=${newSkillDescription} @input=${(e: Event) => { newSkillDescription = (e.target as HTMLTextAreaElement).value; }}></textarea>
+            <button type="submit" ?disabled=${skillsSaving}>Create skill</button>
+          </form>
+          <section class="skills-list-section">
+            <h2>Skills</h2>
+            ${skillsLoading ? html`<p class="skills-muted">Loading...</p>` : skillItems.length ? skillItems.map((skill) => renderSkillListButton(skill)) : html`<p class="skills-muted">No skills yet.</p>`}
+          </section>
+        </aside>
+        <section class="skills-editor-panel">
+          ${skillsError ? html`<div class="skills-alert error">${skillsError}</div>` : nothing}
+          ${skillsMessage ? html`<div class="skills-alert success">${skillsMessage}</div>` : nothing}
+          ${selectedSkill ? html`
+            <div class="skills-editor-toolbar">
+              <div>
+                <h2>${selectedSkill.name}</h2>
+                <p>${selectedSkill.description}</p>
+                ${selectedSkill.diagnostics?.length ? html`<p class="skills-diagnostics">${selectedSkill.diagnostics.join("; ")}</p>` : nothing}
+              </div>
+              <div class="skills-editor-actions">
+                <button type="button" @click=${saveSelectedSkill} ?disabled=${skillsSaving}>Save</button>
+                <button class="danger" type="button" @click=${deleteSelectedSkill} ?disabled=${skillsSaving}>Delete</button>
+              </div>
+            </div>
+            <textarea class="skills-editor" spellcheck="false" .value=${selectedSkillContent} @input=${(e: Event) => { selectedSkillContent = (e.target as HTMLTextAreaElement).value; }}></textarea>
+            <p class="skills-help">Skill changes are picked up by new/reloaded Pi sessions. Skills can strongly steer agent behavior, so review instructions before saving.</p>
+          ` : html`
+            <div class="skills-empty-editor">
+              <h2>Select or create a skill</h2>
+              <p>Skills are stored under the current Pi agent directory in <code>skills/&lt;skill-name&gt;/SKILL.md</code>.</p>
+            </div>
+          `}
+        </section>
+      </main>
+    </div>
+  `, app);
+}
+
 function renderApp() {
   const app = document.getElementById("app");
   if (!app) return;
@@ -948,9 +1148,9 @@ function renderApp() {
     <!-- Main content -->
     <div class="main-content flex flex-col h-full bg-background text-foreground min-w-0 flex-1">
       <!-- Header -->
-      <div class="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0 overflow-visible">
+      <div class="app-topbar flex items-center gap-2 px-3 py-2 border-b border-border shrink-0 overflow-visible">
         <button
-          class="p-1.5 rounded hover:bg-accent transition-colors shrink-0"
+          class="topbar-menu-button p-1.5 rounded hover:bg-accent transition-colors shrink-0"
           title="${sidebarOpen ? 'Close sidebar' : 'Open sessions'}"
           @click=${toggleSidebar}
         >
@@ -965,6 +1165,17 @@ function renderApp() {
 
         <div class="flex-1"></div>
 
+        <button
+          class="topbar-mobile-controls-button"
+          type="button"
+          title="Model and skills menu"
+          aria-expanded=${showMobileControls}
+          @click=${toggleMobileControls}
+        >
+          ${showMobileControls ? icon(X, "sm") : icon(Menu, "sm")}
+        </button>
+
+        <div class="topbar-control-menu ${showMobileControls ? 'open' : ''}">
         <!-- Model selector -->
         <div class="relative shrink-0">
           <button
@@ -1036,6 +1247,9 @@ function renderApp() {
           <option value="medium">Medium</option>
           <option value="high">High</option>
         </select>
+
+        <a class="topbar-skills-link" href="/skills">Skills</a>
+        </div>
 
         ${toolNames.length > 0 ? html`
           <span class="text-[10px] text-muted-foreground shrink-0 hidden sm:inline" title=${toolNames.join(", ")}>
@@ -1112,5 +1326,10 @@ function renderApp() {
 
 // ── Init ──
 
-renderApp();
-connectWs();
+if (location.pathname === "/skills") {
+  renderSkillsManagerApp();
+  void loadSkills();
+} else {
+  renderApp();
+  connectWs();
+}

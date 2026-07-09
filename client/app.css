@@ -107,6 +107,52 @@ textarea {
   overflow: hidden;
 }
 
+.app-topbar {
+  position: relative;
+  min-height: 50px;
+  flex-wrap: wrap;
+}
+
+.topbar-menu-button {
+  color: var(--foreground);
+}
+
+.topbar-mobile-controls-button {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border-radius: var(--app-radius);
+  border: 1px solid var(--border);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  cursor: pointer;
+}
+
+.topbar-control-menu {
+  display: contents;
+}
+
+.topbar-skills-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 10px;
+  border-radius: var(--app-radius);
+  border: 1px solid color-mix(in oklab, var(--accent-foreground) 70%, black);
+  background: color-mix(in oklab, var(--accent-foreground) 86%, black);
+  color: white;
+  text-decoration: none;
+  font-weight: var(--app-font-weight-strong);
+  white-space: nowrap;
+}
+
+.topbar-skills-link:hover,
+.topbar-skills-link:focus-visible {
+  background: color-mix(in oklab, var(--accent-foreground) 74%, black);
+  color: white;
+}
+
 /* ── Sidebar ── */
 
 .sidebar-overlay {
@@ -540,10 +586,242 @@ textarea {
   cursor: default;
 }
 
+.skills-page {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.skills-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-4);
+  padding: var(--app-space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.skills-header h1,
+.skills-header p,
+.skills-editor-toolbar h2,
+.skills-editor-toolbar p,
+.skills-create h2,
+.skills-list-section h2 {
+  margin: 0;
+}
+
+.skills-header a {
+  color: white;
+  background: color-mix(in oklab, var(--accent-foreground) 86%, black);
+  border-radius: var(--app-radius);
+  padding: 7px 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.skills-layout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+}
+
+.skills-sidebar {
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  padding: var(--app-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-4);
+}
+
+.skills-create,
+.skills-list-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-2);
+}
+
+.skills-create input,
+.skills-create textarea,
+.skills-editor {
+  border: 1px solid var(--border);
+  border-radius: var(--app-radius);
+  background: var(--background);
+  color: var(--foreground);
+  padding: var(--app-space-2);
+}
+
+.skills-create button,
+.skills-editor-actions button {
+  border: 1px solid var(--border);
+  border-radius: var(--app-radius);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  padding: var(--app-space-2) var(--app-space-3);
+  cursor: pointer;
+}
+
+.skills-editor-actions .danger {
+  background: color-mix(in oklab, var(--destructive) 18%, var(--secondary));
+  color: var(--destructive);
+}
+
+.skills-list-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--app-radius);
+  background: var(--card);
+  color: var(--foreground);
+  padding: var(--app-space-2);
+  cursor: pointer;
+}
+
+.skills-list-item.active {
+  border-color: var(--accent-foreground);
+  background: color-mix(in oklab, var(--accent-foreground) 12%, var(--card));
+}
+
+.skills-list-item small,
+.skills-muted,
+.skills-help,
+.skills-editor-toolbar p {
+  color: var(--muted-foreground);
+}
+
+.skills-editor-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--app-space-4);
+  gap: var(--app-space-3);
+}
+
+.skills-editor-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--app-space-3);
+  align-items: flex-start;
+}
+
+.skills-editor-actions {
+  display: flex;
+  gap: var(--app-space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.skills-editor {
+  width: 100%;
+  flex: 1;
+  min-height: 320px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace !important;
+  white-space: pre;
+  resize: none;
+}
+
+.skills-alert {
+  padding: var(--app-space-2) var(--app-space-3);
+  border-radius: var(--app-radius);
+  border: 1px solid var(--border);
+}
+
+.skills-alert.error {
+  border-color: var(--destructive);
+  color: var(--destructive);
+}
+
+.skills-alert.success {
+  border-color: var(--accent-foreground);
+  color: var(--accent-foreground);
+}
+
+.skills-diagnostics {
+  color: var(--destructive) !important;
+}
+
+.skills-empty-editor {
+  margin: auto;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+
 @media (max-width: 767px) {
+  html,
+  body,
+  #app {
+    height: 100dvh;
+  }
+
   .main-content {
     width: 100% !important;
     flex: none !important;
+  }
+
+  .app-topbar {
+    gap: var(--app-space-2);
+    padding-inline: var(--app-space-2) !important;
+  }
+
+  .topbar-mobile-controls-button {
+    display: inline-flex;
+  }
+
+  .topbar-control-menu {
+    display: none;
+    order: 10;
+    width: 100%;
+    align-items: stretch;
+    gap: var(--app-space-2);
+    padding-top: var(--app-space-2);
+  }
+
+  .topbar-control-menu.open {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .topbar-control-menu .relative,
+  .topbar-control-menu .model-button,
+  .topbar-control-menu .thinking-select,
+  .topbar-skills-link {
+    width: 100%;
+  }
+
+  .topbar-control-menu #model-dropdown {
+    left: 0.5rem;
+    right: 0.5rem;
+    width: auto;
+  }
+
+  .skills-header,
+  .skills-editor-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .skills-layout {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .skills-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    overflow: visible;
+  }
+
+  .skills-editor-panel {
+    min-height: 70vh;
   }
 }
 

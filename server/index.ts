@@ -95,16 +95,13 @@ const wss = new WebSocketServer({
   },
 });
 
-// Serve static client files in production
-const clientDist = path.resolve(__dirname, "../dist");
-app.use(express.static(clientDist));
-app.get("/{*path}", (_req, res) => {
-  res.sendFile(path.join(clientDist, "client", "index.html"));
-});
+app.use(express.urlencoded({ extended: false, limit: "64kb" }));
+app.use(express.json({ limit: "256kb" }));
 
 const HOME_DIR = os.homedir();
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(HOME_DIR, ".pi", "agent");
 const AGENT_SETTINGS_PATH = path.join(AGENT_DIR, "settings.json");
+const EDITABLE_SKILLS_DIR = path.join(AGENT_DIR, "skills");
 const SESSION_LIST_LIMIT = parseIntEnv("SESSION_LIST_LIMIT", 30);
 const SESSION_LIST_MAX_LIMIT = parseIntEnv("SESSION_LIST_MAX_LIMIT", 100);
 const MESSAGE_PAGE_LIMIT = parseIntEnv("MESSAGE_PAGE_LIMIT", 60);
@@ -141,6 +138,118 @@ function restrictModelsToScoped(): boolean {
 
 function forceModelAliasLabels(): boolean {
   return boolEnv("PI_WEBUI_FORCE_MODEL_ALIAS_LABELS");
+}
+
+type SkillListItem = {
+  id: string;
+  name: string;
+  description: string;
+  path: string;
+  editable: boolean;
+  diagnostics: string[];
+};
+
+function isValidSkillName(name: string): boolean {
+  if (name.length < 1 || name.length > 64) return false;
+  if (name.startsWith("-") || name.endsWith("-") || name.includes("--")) return false;
+  for (const ch of name) {
+    const ok = (ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9") || ch === "-";
+    if (!ok) return false;
+  }
+  return true;
+}
+
+function normalizeSkillDescription(value: string): string {
+  return value.split(" ").filter(Boolean).join(" ").replaceAll("\n", " ").replaceAll("\r", " ").replaceAll("\t", " ").trim();
+}
+
+function parseSkillFrontmatter(content: string): { fields: Record<string, string>; diagnostics: string[] } {
+  const diagnostics: string[] = [];
+  const fields: Record<string, string> = {};
+  const lines = content.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") {
+    diagnostics.push("missing frontmatter fence");
+    return { fields, diagnostics };
+  }
+  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+  if (end < 0) {
+    diagnostics.push("missing closing frontmatter fence");
+    return { fields, diagnostics };
+  }
+  for (let i = 1; i < end; i++) {
+    const line = lines[i];
+    const colon = line.indexOf(":");
+    if (colon <= 0) continue;
+    const key = line.slice(0, colon).trim();
+    let value = line.slice(colon + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+    fields[key] = value;
+  }
+  if (!fields.name) diagnostics.push("missing name");
+  else if (!isValidSkillName(fields.name)) diagnostics.push("invalid name: use lowercase letters, numbers, and single hyphens only");
+  if (!fields.description) diagnostics.push("missing description");
+  else if (fields.description.length > 1024) diagnostics.push("description exceeds 1024 characters");
+  return { fields, diagnostics };
+}
+
+async function readSkillFile(filePath: string): Promise<SkillListItem | undefined> {
+  const content = await fs.promises.readFile(filePath, "utf8").catch(() => "");
+  if (!content) return undefined;
+  const { fields, diagnostics } = parseSkillFrontmatter(content);
+  if (!fields.description) return undefined;
+  const folderName = path.basename(path.dirname(filePath));
+  const name = fields.name || folderName;
+  const id = isValidSkillName(name) ? name : folderName;
+  return { id, name, description: fields.description || "", path: filePath, editable: true, diagnostics };
+}
+
+async function collectEditableSkills(): Promise<SkillListItem[]> {
+  const out: SkillListItem[] = [];
+  const visit = async (dir: string, allowRootFiles: boolean) => {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+    if (entries.some((entry) => entry.isFile() && entry.name === "SKILL.md")) {
+      const item = await readSkillFile(path.join(dir, "SKILL.md"));
+      if (item) out.push(item);
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) await visit(fullPath, false);
+      else if (allowRootFiles && entry.isFile() && entry.name.endsWith(".md")) {
+        const item = await readSkillFile(fullPath);
+        if (item) out.push(item);
+      }
+    }
+  };
+  await visit(EDITABLE_SKILLS_DIR, true);
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function editableSkillPath(name: string): string | undefined {
+  if (!isValidSkillName(name)) return undefined;
+  const root = path.resolve(EDITABLE_SKILLS_DIR);
+  const skillFile = path.resolve(root, name, "SKILL.md");
+  if (!skillFile.startsWith(`${root}${path.sep}`)) return undefined;
+  return skillFile;
+}
+
+async function writeSkillAtomic(skillFile: string, content: string) {
+  await fs.promises.mkdir(path.dirname(skillFile), { recursive: true, mode: 0o700 });
+  const tmp = `${skillFile}.${process.pid}.${Date.now()}.tmp`;
+  await fs.promises.writeFile(tmp, content, { mode: 0o600 });
+  await fs.promises.rename(tmp, skillFile);
+}
+
+function tokenFromRequest(req: express.Request): string | undefined {
+  const header = req.header("x-pi-webui-token") || req.header("authorization") || "";
+  if (header.toLowerCase().startsWith("bearer ")) return header.slice(7).trim();
+  return header.trim() || (typeof req.query.token === "string" ? req.query.token : undefined);
+}
+
+function requireEditAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (isValidToken(tokenFromRequest(req))) return next();
+  res.status(401).json({ ok: false, error: "unauthorized" });
 }
 
 function fileStamp(filePath: string): string {
@@ -1005,6 +1114,65 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
     send(ws, { type: "error", message: err.message || String(err) });
   }
 }
+
+app.get("/api/skills", requireEditAuth, async (_req, res) => {
+  const skills = await collectEditableSkills();
+  res.json({ ok: true, root: EDITABLE_SKILLS_DIR, skills });
+});
+
+app.get("/api/skills/:id", requireEditAuth, async (req, res) => {
+  const id = String(req.params.id || "").trim();
+  const skillFile = editableSkillPath(id);
+  if (!skillFile || !fs.existsSync(skillFile)) return res.status(404).json({ ok: false, error: "not_found" });
+  const item = await readSkillFile(skillFile);
+  const content = await fs.promises.readFile(skillFile, "utf8");
+  res.json({ ok: true, skill: item, content });
+});
+
+app.post("/api/skills", requireEditAuth, async (req, res) => {
+  const name = String(req.body?.name || "").trim().toLowerCase();
+  const description = normalizeSkillDescription(String(req.body?.description || ""));
+  if (!isValidSkillName(name)) return res.status(400).json({ ok: false, error: "invalid_name", message: "Use lowercase letters, numbers, and single hyphens only." });
+  if (!description || description.length > 1024) return res.status(400).json({ ok: false, error: "invalid_description", message: "Description is required and must be at most 1024 characters." });
+  const skillFile = editableSkillPath(name);
+  if (!skillFile) return res.status(400).json({ ok: false, error: "invalid_name" });
+  if (fs.existsSync(skillFile)) return res.status(409).json({ ok: false, error: "already_exists" });
+  const escapedDescription = description.replaceAll('"', "'");
+  const content = `---\nname: ${name}\ndescription: "${escapedDescription}"\n---\n\n# ${name}\n\n## When to use\n\n${description}\n\n## Instructions\n\n- Describe the workflow this skill should guide.\n- Add any setup, commands, references, or safety constraints the agent should follow.\n`;
+  await writeSkillAtomic(skillFile, content);
+  const item = await readSkillFile(skillFile);
+  res.json({ ok: true, skill: item, content, note: "Start a new session or reload the current one for Pi to advertise new/changed skills." });
+});
+
+app.put("/api/skills/:id", requireEditAuth, async (req, res) => {
+  const id = String(req.params.id || "").trim();
+  const content = String(req.body?.content || "");
+  if (!isValidSkillName(id)) return res.status(400).json({ ok: false, error: "invalid_name" });
+  if (Buffer.byteLength(content, "utf8") > 100_000) return res.status(413).json({ ok: false, error: "content_too_large", message: "Skill content must be at most 100 KB." });
+  const parsed = parseSkillFrontmatter(content);
+  if (parsed.diagnostics.length > 0) return res.status(400).json({ ok: false, error: "invalid_skill", diagnostics: parsed.diagnostics });
+  if (parsed.fields.name !== id) return res.status(400).json({ ok: false, error: "name_mismatch", message: "The frontmatter name must match the skill being edited. Create a new skill to rename." });
+  const skillFile = editableSkillPath(id);
+  if (!skillFile || !fs.existsSync(skillFile)) return res.status(404).json({ ok: false, error: "not_found" });
+  await writeSkillAtomic(skillFile, content);
+  const item = await readSkillFile(skillFile);
+  res.json({ ok: true, skill: item, note: "Start a new session or reload the current one for Pi to advertise new/changed skills." });
+});
+
+app.delete("/api/skills/:id", requireEditAuth, async (req, res) => {
+  const id = String(req.params.id || "").trim();
+  const skillFile = editableSkillPath(id);
+  if (!skillFile || !fs.existsSync(skillFile)) return res.status(404).json({ ok: false, error: "not_found" });
+  await fs.promises.rm(path.dirname(skillFile), { recursive: true, force: true });
+  res.json({ ok: true, note: "Deleted. Start a new session or reload the current one to remove it from advertised skills." });
+});
+
+// Serve static client files in production after API routes.
+const clientDist = path.resolve(__dirname, "../dist");
+app.use(express.static(clientDist));
+app.get("/{*path}", (_req, res) => {
+  res.sendFile(path.join(clientDist, "client", "index.html"));
+});
 
 async function main() {
   console.log("Initializing Pi agent session...");
