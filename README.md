@@ -33,9 +33,19 @@ npm run build
 |---|---|---|
 | `PORT` | `3001` | Server listen port |
 | `HOST` | `127.0.0.1` | Server listen address. Use `0.0.0.0` only on a trusted network and with `PI_WEBUI_TOKEN` set. |
-| `PI_WEBUI_TOKEN` | *(unset)* | Optional shared secret for `/api/ws` and the skills editor API. If set, open `/?token=<token>` once; the client stores it in local storage for reconnects, removes `token` from the visible URL, and sends later WebSocket/authenticated API requests without keeping the token in the visible URL. Query-string tokens may still appear in browser/proxy logs for the initial page load and are readable by page JavaScript before removal, so use only on trusted local networks. If unset, WebSocket access relies on Origin checks and local/trusted hosting. |
-| `PI_WEBUI_ALLOWED_ORIGINS` | same host as request | Optional comma-separated extra WebSocket `Origin` allowlist. |
+| `PI_WEBUI_TOKEN` | *(unset)* | **Required by default** shared secret for `/api/ws` and the skills editor API. If set, open `/?token=<token>` once on first load; the client stores it in `localStorage` and removes the query parameter from the URL. |
+| `PI_WEBUI_ALLOW_ANONYMOUS` | `false` | Local development escape hatch only: tokenless mode requires this flag and a loopback `HOST`. Non-loopback/public binding always requires `PI_WEBUI_TOKEN`. |
+| `PI_WEBUI_ALLOWED_ORIGINS` | same host as request | Additional comma-separated WebSocket `Origin` allowlist values. |
 | `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Pi agent config directory for auth, models, settings, sessions, and shared skills. |
+| `PI_WEBUI_SKILL_MAX_FILES` | `220` | Max SKILL parse candidates per skill directory scan. |
+| `PI_WEBUI_SKILL_PARSE_BYTE_BUDGET` | `3000000` | Max total bytes read while scanning skills for a list call. |
+| `PI_WEBUI_SKILL_FILE_MAX_BYTES` | `240000` | Max bytes per individual skill file. |
+| `PI_WEBUI_SKILL_MAX_DEPTH` | `8` | Max recursive directory depth while scanning skill directories. |
+| `PI_WEBUI_SKILL_DIRECTORY_ENTRY_LIMIT` | `1000` | Max entries inspected in any one visited skill directory. |
+| `PI_WEBUI_SESSION_DIRECTORY_SCAN_LIMIT` | `800` | Max directory entries considered for a session listing scan before sorting and pagination. |
+| `PI_WEBUI_SESSION_MAX_FILES` | `240` | Max session files parsed per listing request. |
+| `PI_WEBUI_SESSION_PARSE_BYTE_BUDGET` | `6000000` | Max total bytes read for session list parsing per request. |
+| `PI_WEBUI_SESSION_FILE_MAX_BYTES` | `220000` | Max leading bytes read from each session for bounded listing/search; large sessions remain listable but searches do not inspect content beyond this prefix. |
 | `PI_WEBUI_USER_SKILLS_DIR` | `~/.pi/skills` | Private skills edited from `/skills`. With the default working directory this is loaded by Pi as a project-local skills directory. |
 | `PI_WEBUI_SHARED_SKILLS_DIR` | `$PI_CODING_AGENT_DIR/skills` | Shared read-only skills listed in `/skills` and available to all agents using this agent dir. |
 | `PI_WEBUI_RESTRICT_MODELS_TO_SCOPED` | *(unset)* | If true/yes/on/1, only models from `PI_WEBUI_MODEL`, `PI_MODEL`, `settings.defaultProvider/defaultModel`, or `settings.enabledModels` are listed/selectable. |

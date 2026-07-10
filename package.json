@@ -10,7 +10,8 @@
     "build": "npm run build:client",
     "build:client": "vite build",
     "start": "tsx server/index.ts",
-    "preview": "npm run build && npm run start"
+    "preview": "npm run build && npm run start",
+    "test": "node --test --import tsx tests/*.test.ts"
   },
   "dependencies": {
     "@mariozechner/mini-lit": "^0.2.1",

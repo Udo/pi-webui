@@ -1,5 +1,7 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
+import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import "./app.css";
+import { installMarkdownSecurityPatch } from "./markdown-security-patch.js";
 
 import { html, render, nothing } from "lit";
 import { icon } from "@mariozechner/mini-lit";
@@ -19,6 +21,7 @@ import {
 void MessageList;
 void MessageEditor;
 void StreamingMessageContainer;
+installMarkdownSecurityPatch();
 installAssistantMetadataRenderer();
 import type {
   ClientMessage,
@@ -27,6 +30,7 @@ import type {
   SerializedAgentState,
   SessionListItem,
 } from "../shared/protocol.js";
+import { sanitizeMarkdownLinks } from "../shared/markdown-security.js";
 
 function toolResultText(result: ToolResultMessage | undefined): string {
   return result?.content
@@ -234,7 +238,7 @@ function installAssistantMetadataRenderer() {
 
     for (const chunk of this.message.content) {
       if (chunk.type === "text" && chunk.text.trim() !== "") {
-        orderedParts.push(html`<markdown-block .content=${chunk.text}></markdown-block>`);
+        orderedParts.push(html`<markdown-block .content=${sanitizeMarkdownLinks(chunk.text)}></markdown-block>`);
       } else if (chunk.type === "thinking" && chunk.thinking.trim() !== "") {
         orderedParts.push(html`<thinking-block .content=${chunk.thinking} .isStreaming=${this.isStreaming}></thinking-block>`);
       } else if (chunk.type === "toolCall" && !this.hideToolCalls) {

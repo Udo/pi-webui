@@ -17,6 +17,14 @@ import {
   type AgentSession,
   type AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
+import {
+  canReadFile,
+  createParsingState,
+  markStopped,
+  parseDepthIsAllowed,
+  recordRead,
+  type ParsingLimits,
+} from "./parsing-budget.js";
 import { Type, type Model, type Api } from "@mariozechner/pi-ai";
 import type {
   ClientMessage,
@@ -29,7 +37,12 @@ import type {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 function parseIntEnv(name: string, fallback: number): number {
   const value = Number.parseInt(process.env[name] || "", 10);
-  return Number.isFinite(value) ? value : fallback;
+  return Number.isFinite(value) ? Math.max(0, value) : fallback;
+}
+
+function parseLimitedIntEnv(name: string, fallback: number): number {
+  const value = parseIntEnv(name, fallback);
+  return value > 0 ? value : fallback;
 }
 
 const PORT = parseIntEnv("PORT", 3001);
@@ -40,13 +53,38 @@ let litellmKey = process.env.LITELLM_KEY || "";
 
 const app = express();
 const server = createServer(app);
-const webUiToken = process.env.PI_WEBUI_TOKEN || "";
+const webUiToken = (process.env.PI_WEBUI_TOKEN || "").trim();
+const allowAnonymous = ["1", "true", "yes", "on"].includes((process.env.PI_WEBUI_ALLOW_ANONYMOUS || "").trim().toLowerCase());
+const anonymousLoopbackOnly = HOST === "127.0.0.1" || HOST === "::1" || HOST === "localhost";
 const allowedOrigins = new Set(
   (process.env.PI_WEBUI_ALLOWED_ORIGINS || "")
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean),
 );
+
+const SECURITY_HEADERS = {
+  csp: "default-src 'self'; base-uri 'self'; form-action 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; frame-ancestors 'none';",
+  hsts: "max-age=31536000; includeSubDomains; preload",
+  referrerPolicy: "strict-origin-when-cross-origin",
+  frameOptions: "DENY",
+  contentTypeOptions: "nosniff",
+};
+
+const SKILL_PARSE_LIMITS: ParsingLimits = {
+  maxFiles: parseLimitedIntEnv("PI_WEBUI_SKILL_MAX_FILES", 220),
+  maxBytesTotal: parseLimitedIntEnv("PI_WEBUI_SKILL_PARSE_BYTE_BUDGET", 3_000_000),
+  maxBytesPerFile: parseLimitedIntEnv("PI_WEBUI_SKILL_FILE_MAX_BYTES", 240_000),
+};
+const SKILL_MAX_DEPTH = parseLimitedIntEnv("PI_WEBUI_SKILL_MAX_DEPTH", 8);
+const SKILL_DIRECTORY_ENTRY_LIMIT = parseLimitedIntEnv("PI_WEBUI_SKILL_DIRECTORY_ENTRY_LIMIT", 1000);
+
+const SESSION_PARSE_LIMITS: ParsingLimits = {
+  maxFiles: parseLimitedIntEnv("PI_WEBUI_SESSION_MAX_FILES", 240),
+  maxBytesTotal: parseLimitedIntEnv("PI_WEBUI_SESSION_PARSE_BYTE_BUDGET", 6_000_000),
+  maxBytesPerFile: parseLimitedIntEnv("PI_WEBUI_SESSION_FILE_MAX_BYTES", 220_000),
+};
+const SESSION_DIRECTORY_SCAN_LIMIT = parseLimitedIntEnv("PI_WEBUI_SESSION_DIRECTORY_SCAN_LIMIT", 800);
 
 function isAllowedWsOrigin(origin: string | undefined, hostHeader: string | undefined): boolean {
   if (!origin) return true;
@@ -60,11 +98,27 @@ function isAllowedWsOrigin(origin: string | undefined, hostHeader: string | unde
 }
 
 function isValidToken(candidate: string | undefined): boolean {
+  if (!webUiToken && !allowAnonymous) return false;
   if (!webUiToken) return true;
   if (!candidate) return false;
   const expected = Buffer.from(webUiToken);
   const actual = Buffer.from(candidate);
   return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function tokenFromRequestHeader(req: express.Request): string | undefined {
+  const header = req.header("x-pi-webui-token") || req.header("authorization") || "";
+  if (header.toLowerCase().startsWith("bearer ")) return header.slice(7).trim();
+  return header.trim();
+}
+
+function tokenFromWebSocketHeaders(headers: Record<string, string | string[] | undefined>): string | undefined {
+  const header = headers["x-pi-webui-token"] || headers["X-PI-WEBUI-TOKEN"];
+  if (!header) return undefined;
+  if (Array.isArray(header)) return header[0]?.trim();
+  const value = typeof header === "string" ? header.trim() : "";
+  if (value.toLowerCase().startsWith("bearer ")) return value.slice(7).trim();
+  return value;
 }
 
 function tokenFromWebSocketProtocol(header: string | string[] | undefined): string | undefined {
@@ -90,15 +144,31 @@ const wss = new WebSocketServer({
   maxPayload: 1024 * 1024,
   verifyClient: (info, done) => {
     const originOk = isAllowedWsOrigin(info.origin, info.req.headers.host);
-    const urlToken = new URL(info.req.url || "/", "http://localhost").searchParams.get("token") || undefined;
     const protocolToken = tokenFromWebSocketProtocol(info.req.headers["sec-websocket-protocol"]);
-    const tokenOk = isValidToken(protocolToken || urlToken);
+    const headerToken = tokenFromWebSocketHeaders(info.req.headers as Record<string, string | string[] | undefined>);
+    const tokenOk = isValidToken(protocolToken || headerToken);
     done(originOk && tokenOk, originOk ? 401 : 403, originOk ? "Unauthorized" : "Forbidden");
   },
 });
 
+app.use((_req, res, next) => {
+  res.setHeader("Content-Security-Policy", SECURITY_HEADERS.csp);
+  res.setHeader("X-Content-Type-Options", SECURITY_HEADERS.contentTypeOptions);
+  res.setHeader("Referrer-Policy", SECURITY_HEADERS.referrerPolicy);
+  res.setHeader("X-Frame-Options", SECURITY_HEADERS.frameOptions);
+  res.setHeader("Strict-Transport-Security", SECURITY_HEADERS.hsts);
+  next();
+});
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 app.use(express.json({ limit: "256kb" }));
+
+wss.on("headers", (headers) => {
+  headers.push(`Content-Security-Policy: ${SECURITY_HEADERS.csp}`);
+  headers.push(`X-Content-Type-Options: ${SECURITY_HEADERS.contentTypeOptions}`);
+  headers.push(`Referrer-Policy: ${SECURITY_HEADERS.referrerPolicy}`);
+  headers.push(`X-Frame-Options: ${SECURITY_HEADERS.frameOptions}`);
+  headers.push(`Strict-Transport-Security: ${SECURITY_HEADERS.hsts}`);
+});
 
 const HOME_DIR = os.homedir();
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(HOME_DIR, ".pi", "agent");
@@ -198,37 +268,76 @@ function parseSkillFrontmatter(content: string): { fields: Record<string, string
   return { fields, diagnostics };
 }
 
-async function readSkillFile(filePath: string, source: SkillSource, editable: boolean): Promise<SkillListItem | undefined> {
+async function readSkillFile(filePath: string, source: SkillSource, editable: boolean, state: ReturnType<typeof createParsingState>): Promise<SkillListItem | undefined> {
+  const stats = await fs.promises.stat(filePath).catch(() => undefined);
+  const sizeBytes = stats?.size ?? 0;
+  const decision = canReadFile(sizeBytes, SKILL_PARSE_LIMITS, state);
+  if (!decision.canRead) {
+    if (decision.stop) markStopped(state, decision.reason!);
+    return undefined;
+  }
+
   const content = await fs.promises.readFile(filePath, "utf8").catch(() => "");
   if (!content) return undefined;
   const { fields, diagnostics } = parseSkillFrontmatter(content);
-  if (!fields.description) return undefined;
+  if (!fields.description) {
+    recordRead(sizeBytes, state);
+    return undefined;
+  }
   const folderName = path.basename(path.dirname(filePath));
   const name = fields.name || folderName;
   const id = source === "user" && isValidSkillName(name) ? name : createHash("sha256").update(path.resolve(filePath)).digest("hex").slice(0, 16);
+
+  recordRead(sizeBytes, state);
   return { id, name, description: fields.description || "", path: filePath, source, editable, diagnostics };
+}
+
+async function readDirectoryEntriesLimited(dir: string, maxEntries: number): Promise<fs.Dirent[]> {
+  const out: fs.Dirent[] = [];
+  const handle = await fs.promises.opendir(dir).catch(() => undefined);
+  if (!handle) return out;
+  try {
+    for await (const entry of handle) {
+      out.push(entry);
+      if (maxEntries > 0 && out.length >= maxEntries) break;
+    }
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+  return out;
 }
 
 async function collectSkillsFromRoot(root: string, source: SkillSource, editable: boolean): Promise<SkillListItem[]> {
   const out: SkillListItem[] = [];
-  const visit = async (dir: string, allowRootFiles: boolean) => {
-    const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+  const state = createParsingState();
+
+  const visit = async (dir: string, depth: number, allowRootFiles: boolean): Promise<void> => {
+    if (state.stopReason) return;
+    if (!parseDepthIsAllowed(depth, SKILL_MAX_DEPTH)) {
+      return;
+    }
+
+    const entries = await readDirectoryEntriesLimited(dir, SKILL_DIRECTORY_ENTRY_LIMIT);
     if (entries.some((entry) => entry.isFile() && entry.name === "SKILL.md")) {
-      const item = await readSkillFile(path.join(dir, "SKILL.md"), source, editable);
+      const item = await readSkillFile(path.join(dir, "SKILL.md"), source, editable, state);
       if (item) out.push(item);
       return;
     }
+
     for (const entry of entries) {
+      if (state.stopReason) break;
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
       const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) await visit(fullPath, false);
-      else if (allowRootFiles && entry.isFile() && entry.name.endsWith(".md")) {
-        const item = await readSkillFile(fullPath, source, editable);
+      if (entry.isDirectory()) {
+        await visit(fullPath, depth + 1, false);
+      } else if (allowRootFiles && entry.isFile() && entry.name.endsWith(".md")) {
+        const item = await readSkillFile(fullPath, source, editable, state);
         if (item) out.push(item);
       }
     }
   };
-  await visit(root, true);
+
+  await visit(root, 1, true);
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -261,14 +370,15 @@ async function getSkillContent(source: string, id: string): Promise<{ item: Skil
   const skills = await listSkills();
   const item = skills.find((skill) => skill.source === source && skill.id === id);
   if (!item) return undefined;
+
+  const stat = await fs.promises.stat(item.path).catch(() => undefined);
+  if (!stat || stat.size > SKILL_PARSE_LIMITS.maxBytesPerFile) return undefined;
   const content = await fs.promises.readFile(item.path, "utf8");
   return { item, content };
 }
 
 function tokenFromRequest(req: express.Request): string | undefined {
-  const header = req.header("x-pi-webui-token") || req.header("authorization") || "";
-  if (header.toLowerCase().startsWith("bearer ")) return header.slice(7).trim();
-  return header.trim() || (typeof req.query.token === "string" ? req.query.token : undefined);
+  return tokenFromRequestHeader(req);
 }
 
 function requireEditAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -513,19 +623,50 @@ async function sessionFiles(): Promise<{ filePath: string; mtime: Date }[]> {
   if (sessionListCache && sessionListCache.expires > now) return sessionListCache.files;
 
   const dir = getSessionDir(HOME_DIR);
-  const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
-  const files = (await Promise.all(entries
+  const entries = await readDirectoryEntriesLimited(dir, SESSION_DIRECTORY_SCAN_LIMIT);
+  const candidates = entries
     .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
-    .map(async (entry) => {
-      const filePath = path.join(dir, entry.name);
-      const stats = await fs.promises.stat(filePath).catch(() => undefined);
-      return stats ? { filePath, mtime: stats.mtime } : undefined;
-    })))
+    // Sort the bounded candidate set before stat calls and pagination.
+    .sort((a, b) => b.name.localeCompare(a.name))
+    .slice(0, SESSION_DIRECTORY_SCAN_LIMIT);
+  const files = (await Promise.all(candidates.map(async (entry) => {
+    const filePath = path.join(dir, entry.name);
+    const stats = await fs.promises.stat(filePath).catch(() => undefined);
+    return stats ? { filePath, mtime: stats.mtime } : undefined;
+  })))
     .filter((file): file is { filePath: string; mtime: Date } => Boolean(file))
     .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
   sessionListCache = { expires: now + SESSION_LIST_CACHE_MS, files };
   return files;
+}
+
+async function readSessionHead(filePath: string, state: ReturnType<typeof createParsingState>): Promise<string | undefined> {
+  if (SESSION_PARSE_LIMITS.maxFiles > 0 && state.files >= SESSION_PARSE_LIMITS.maxFiles) {
+    markStopped(state, "file-count-limit");
+    return undefined;
+  }
+  const remaining = SESSION_PARSE_LIMITS.maxBytesTotal > 0
+    ? SESSION_PARSE_LIMITS.maxBytesTotal - state.bytes
+    : SESSION_PARSE_LIMITS.maxBytesPerFile;
+  const cap = Math.min(SESSION_PARSE_LIMITS.maxBytesPerFile, remaining);
+  if (cap <= 0) {
+    markStopped(state, "request-byte-limit");
+    return undefined;
+  }
+  const handle = await fs.promises.open(filePath, "r").catch(() => undefined);
+  if (!handle) return undefined;
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) return undefined;
+    const bytesToRead = Math.min(stats.size, cap);
+    const buffer = Buffer.alloc(bytesToRead);
+    const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0);
+    recordRead(bytesRead, state);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
 async function listRecentSessions(options: { offset?: number; limit?: number; query?: string } = {}): Promise<{ items: SessionListItem[]; total: number; hasMore: boolean; offset: number; limit: number; query: string }> {
@@ -534,14 +675,25 @@ async function listRecentSessions(options: { offset?: number; limit?: number; qu
   const query = (options.query || "").trim().toLowerCase();
   const files = await sessionFiles();
   const matched: SessionListItem[] = [];
+  const state = createParsingState();
   let seenMatches = 0;
   let hasMore = false;
 
   for (const { filePath, mtime } of files) {
-    const content = await fs.promises.readFile(filePath, "utf8").catch(() => "");
-    if (!content) continue;
+    if (state.stopReason) {
+      hasMore = true;
+      break;
+    }
+
+    const content = await readSessionHead(filePath, state);
+    if (!content) {
+      if (state.stopReason) hasMore = true;
+      continue;
+    }
+
     const item = sessionItemFromContent(filePath, content, mtime);
     if (!item) continue;
+
     const haystack = query ? `${item.name || ""}\n${item.firstMessage}\n${content}`.toLowerCase() : "";
     if (query && !haystack.includes(query)) continue;
     if (seenMatches++ < offset) continue;
@@ -1177,7 +1329,7 @@ app.post("/api/skills", requireEditAuth, async (req, res) => {
   const escapedDescription = description.replaceAll('"', "'");
   const content = `---\nname: ${name}\ndescription: "${escapedDescription}"\n---\n\n# ${name}\n\n## When to use\n\n${description}\n\n## Instructions\n\n- Describe the workflow this skill should guide.\n- Add any setup, commands, references, or safety constraints the agent should follow.\n`;
   await writeSkillAtomic(skillFile, content);
-  const item = await readSkillFile(skillFile, "user", true);
+  const item = await readSkillFile(skillFile, "user", true, createParsingState());
   res.json({ ok: true, skill: item, content, note: "Start a new session or reload the current one for Pi to advertise new/changed skills." });
 });
 
@@ -1192,7 +1344,7 @@ app.put("/api/skills/user/:id", requireEditAuth, async (req, res) => {
   const skillFile = userSkillPath(id);
   if (!skillFile || !fs.existsSync(skillFile)) return res.status(404).json({ ok: false, error: "not_found" });
   await writeSkillAtomic(skillFile, content);
-  const item = await readSkillFile(skillFile, "user", true);
+  const item = await readSkillFile(skillFile, "user", true, createParsingState());
   res.json({ ok: true, skill: item, note: "Start a new session or reload the current one for Pi to advertise new/changed skills." });
 });
 
@@ -1213,6 +1365,10 @@ app.get("/{*path}", (_req, res) => {
 
 async function main() {
   console.log("Initializing Pi agent session...");
+
+  if (!webUiToken && (!allowAnonymous || !anonymousLoopbackOnly)) {
+    throw new Error("PI_WEBUI_TOKEN is required. Anonymous mode is allowed only when PI_WEBUI_ALLOW_ANONYMOUS=true and HOST is loopback.");
+  }
 
   authStorage = AuthStorage.create(path.join(AGENT_DIR, "auth.json"));
   modelRegistry = ModelRegistry.create(authStorage, path.join(AGENT_DIR, "models.json"));
@@ -1277,10 +1433,13 @@ async function main() {
 
   server.listen(PORT, HOST, () => {
     console.log(`Pi WebUI server listening on http://${HOST}:${PORT}`);
+
     if (webUiToken) {
-      console.log("PI_WEBUI_TOKEN is configured; open the UI with ?token=<token> once.");
-    } else {
-      console.warn("PI_WEBUI_TOKEN is not configured; relying on WebSocket Origin checks only.");
+      console.log("PI_WEBUI_TOKEN is required and enabled. Open the UI with ?token=<token> once; the client stores it in localStorage and then removes it from the URL.");
+    }
+
+    if (!webUiToken) {
+      console.log("PI_WEBUI_ALLOW_ANONYMOUS=true is set on loopback; tokenless local development access is enabled.");
     }
   });
 }
