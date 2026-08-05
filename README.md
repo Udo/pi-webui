@@ -16,8 +16,8 @@ Node.js server (Express + ws)
 System tools (bash, files, skills, extensions)
 ```
 
-- **Server** (`server/index.ts`): Runs one Pi SDK `AgentSession` per WebSocket client with full system access. Loads auth and model config from `~/.pi/agent`. Streams each client's agent events only to that client. Model discovery comes from the Pi model registry, with optional LiteLLM augmentation.
-- **Client** (`client/main.ts`): Lit-based UI using `@mariozechner/pi-web-ui` components (`MessageList`, `MessageEditor`, `StreamingMessageContainer`). Communicates exclusively via WebSocket.
+- **Server** (`server/index.ts`): Runs one Pi SDK `AgentSession` per WebSocket client with full system access. Loads auth and model config from `~/.pi/agent` through `ModelRuntime`. Streams each client's agent events only to that client. Model discovery can use LiteLLM.
+- **Client** (`client/main.ts`): Lit-based UI using `@earendil-works/pi-web-ui` components (`MessageList`, `MessageEditor`, `StreamingMessageContainer`). Communicates only through WebSocket.
 - **Protocol** (`shared/protocol.ts`): Typed JSON message definitions for the WebSocket wire format.
 
 ## Setup
@@ -36,6 +36,7 @@ npm run build
 | `PI_WEBUI_TOKEN` | *(unset)* | **Required by default** shared secret for `/api/ws` and the skills editor API. If set, open `/?token=<token>` once on first load; the client stores it in `localStorage` and removes the query parameter from the URL. |
 | `PI_WEBUI_ALLOW_ANONYMOUS` | `false` | Local development escape hatch only: tokenless mode requires this flag and a loopback `HOST`. Non-loopback/public binding always requires `PI_WEBUI_TOKEN`. |
 | `PI_WEBUI_ALLOWED_ORIGINS` | same host as request | Additional comma-separated WebSocket `Origin` allowlist values. |
+| `PI_WEBUI_TITLE` | `Pi Web UI` | Browser title and visible application name. |
 | `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Pi agent config directory for auth, models, settings, sessions, and shared skills. |
 | `PI_WEBUI_SKILL_MAX_FILES` | `220` | Max SKILL parse candidates per skill directory scan. |
 | `PI_WEBUI_SKILL_PARSE_BYTE_BUDGET` | `3000000` | Max total bytes read while scanning skills for a list call. |
@@ -77,13 +78,17 @@ HOST=127.0.0.1 PORT=8085 PI_WEBUI_TOKEN=change-me npm start
 ## Features
 
 - Full Pi agent with system access (bash, read, edit, write, extensions)
-- Per-browser-client session isolation with persistence and history — create new sessions, rename sessions, search conversations, and browse/resume previous sessions with paged loading
-- Model switching with scoped/default models first and an optional full model list (Pi model registry plus optional LiteLLM)
+- Per-browser-client session isolation with persistence and history
+- Session search, rename, deletion, stable session links, and paged loading
+- Model switching with scoped/default models first and an optional full model list
 - Optional scoped-only model selection and alias-only model labels
-- Configurable thinking level (off, minimal, low, medium, high), with saved session model/thinking restored on resume
-- Streaming responses with tool execution display and paged conversation loading for long histories
-- Built-in skills manager at `/skills` for creating/editing private skills under `~/.pi/skills` and viewing shared read-only skills from `$PI_CODING_AGENT_DIR/skills`; private skills with the same name take precedence
-- Collapsible session sidebar (inline on desktop, overlay on mobile) plus a mobile top-bar controls menu
+- Configurable thinking level with saved session settings restored on resume
+- Startup resource summary for the model, session, tools, and advertised skills
+- Activity and compaction status during long turns
+- Prompt history through the Up and Down keys
+- Structured tool-result summaries and paged conversation loading
+- Built-in skills manager at `/skills` for private and shared skills
+- Responsive session sidebar and mobile top-bar controls
 - Dark/light theme toggle with green accent
 
 ## Project structure

@@ -2,13 +2,14 @@ import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import "./app.css";
 import { installMarkdownSecurityPatch } from "./markdown-security-patch.js";
+import { summarizeToolResultData } from "./tool-result-summary.js";
 
 import { html, render, nothing } from "lit";
 import { icon } from "@mariozechner/mini-lit";
-import { Check, ChevronDown, Pencil, Plus, PanelLeftClose, Menu, X } from "lucide";
+import { Check, ChevronDown, Pencil, Plus, PanelLeftClose, Menu, Trash2, X } from "lucide";
 
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 
 import {
   AssistantMessage,
@@ -16,7 +17,7 @@ import {
   MessageEditor,
   StreamingMessageContainer,
   formatUsage,
-} from "@mariozechner/pi-web-ui";
+} from "@earendil-works/pi-web-ui";
 
 void MessageList;
 void MessageEditor;
@@ -81,32 +82,12 @@ function summarizeToolCall(toolName: string, args: any): string {
   return "";
 }
 
-function firstCount(value: any): number | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  if (Array.isArray(value)) return value.length;
-  for (const key of ["items", "rows", "results", "entries"]) {
-    if (Array.isArray(value[key])) return value[key].length;
-  }
-  for (const child of Object.values(value)) {
-    const count = firstCount(child);
-    if (count !== undefined) return count;
-  }
-  return undefined;
-}
-
 function summarizeToolResult(result: ToolResultMessage | undefined): string {
   if (!result) return "";
   const text = toolResultText(result);
   let parsed: any;
   try { parsed = text ? JSON.parse(text) : result.details; } catch { parsed = result.details; }
-  const count = firstCount(parsed);
-  const parts = [];
-  if (result.isError) parts.push("error");
-  if (typeof count === "number") parts.push(`${count} item${count === 1 ? "" : "s"}`);
-  if (parsed?.page?.has_more) parts.push("more available");
-  if (parsed?.truncated || parsed?.page?.truncated) parts.push("truncated");
-  if (parts.length > 0) return parts.join(" · ");
-  return text ? `${text.length.toLocaleString()} chars` : "no output";
+  return summarizeToolResultData(parsed, result.isError === true, text.length);
 }
 
 function allVisibleToolCallIds(): string[] {
@@ -230,7 +211,7 @@ function assistantMetadata(message: any): string {
 }
 
 function installAssistantMetadataRenderer() {
-  // @mariozechner/pi-web-ui currently has no trailing-metadata slot/hook for
+  // @earendil-works/pi-web-ui currently has no trailing-metadata slot/hook for
   // assistant messages, so this app overrides the component renderer locally.
   // Re-audit this copy after pi-web-ui updates, especially around chunk/tool rendering.
   (AssistantMessage.prototype as any).render = function () {
@@ -288,9 +269,19 @@ let showModelDropdown = false;
 let modelFilter = "";
 let showAllModels = false;
 let toolNames: string[] = [];
+let systemPrompt = "";
 let currentSessionId = "";
 let currentSessionName: string | undefined;
 let currentSessionPath: string | undefined;
+let currentCwd = "";
+let appTitle = "Pi Web UI";
+let compactionActive = false;
+let compactionMessage = "";
+let lastCompactionStatus = "";
+let activityMessage = "";
+const promptHistory: string[] = [];
+let promptHistoryIndex: number | undefined;
+let promptHistoryDraft = "";
 let errorClearTimer: number | undefined;
 let sidebarOpen = false;
 let showMobileControls = false;
@@ -330,9 +321,12 @@ function removeTokenFromLocation(params: URLSearchParams) {
 
 function getWsUrl(): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const pageParams = new URLSearchParams(location.search);
+  const sessionId = pageParams.get("session") || pageParams.get("sessionId") || "";
   const lastPath = localStorage.getItem("pi-webui-session-path") || "";
   const params = new URLSearchParams();
-  if (lastPath) params.set("sessionPath", lastPath);
+  if (sessionId) params.set("session", sessionId);
+  else if (lastPath) params.set("sessionPath", lastPath);
   const query = params.toString() ? `?${params.toString()}` : "";
   return `${proto}//${location.host}/api/ws${query}`;
 }
@@ -482,6 +476,7 @@ function applyStateSync(state: SerializedAgentState) {
   streamingMessage = state.streamingMessage || null;
   thinkingLevel = state.thinkingLevel;
   toolNames = state.tools;
+  systemPrompt = state.systemPrompt;
   if (state.model) currentModel = state.model;
   if (state.errorMessage) errorMessage = state.errorMessage;
   if (currentSessionId && currentSessionId !== state.sessionId) {
@@ -493,6 +488,10 @@ function applyStateSync(state: SerializedAgentState) {
   currentSessionId = state.sessionId;
   currentSessionName = state.sessionName;
   currentSessionPath = state.sessionPath;
+  currentCwd = state.cwd || "";
+  appTitle = state.appTitle || "Pi Web UI";
+  document.title = appTitle;
+  updateSessionUrl(currentSessionId);
   if (currentSessionPath) {
     localStorage.setItem("pi-webui-session-path", currentSessionPath);
   }
@@ -502,23 +501,44 @@ function applyStateSync(state: SerializedAgentState) {
 
 function handleAgentEvent(event: any) {
   switch (event.type) {
+    case "webui_activity":
+      activityMessage = event.active ? (event.message || "Working...") : "";
+      renderApp();
+      break;
+    case "compaction_start":
+      compactionActive = true;
+      activityMessage = "";
+      compactionMessage = event.reason === "manual" ? "Compacting context..." : event.reason === "overflow" ? "Context limit reached. Compacting and retrying..." : "Auto-compacting context...";
+      lastCompactionStatus = compactionMessage;
+      renderApp();
+      break;
+    case "compaction_end":
+      compactionActive = false;
+      lastCompactionStatus = event.errorMessage ? `Compaction failed: ${event.errorMessage}` : event.aborted ? "Compaction was canceled." : event.result ? (event.willRetry ? "Context compacted. Retrying automatically..." : "Context compacted.") : "Compaction was not needed.";
+      if (event.errorMessage) errorMessage = lastCompactionStatus;
+      renderApp();
+      break;
     case "agent_start":
       isStreaming = true;
+      activityMessage = "Waiting for the model...";
       renderApp();
       break;
 
     case "agent_end":
       isStreaming = false;
+      activityMessage = "";
       streamingMessage = null;
       updateStreamingContainer(null, false);
       renderApp();
       break;
 
     case "message_start":
+      if (event.message?.role === "assistant") activityMessage = "Receiving response...";
       renderApp();
       break;
 
     case "message_update":
+      activityMessage = "";
       noteVisibleToolCalls(event.message);
       streamingMessage = event.message;
       updateStreamingContainer(event.message, true);
@@ -572,6 +592,7 @@ function handleAgentEvent(event: any) {
       renderApp();
       break;
     case "tool_execution_start":
+      activityMessage = `Running ${event.toolName || event.name || event.toolCall?.name || "tool"}...`;
       if (typeof event.toolCallId === "string" && !seenToolCallIds.has(event.toolCallId)) {
         collapsePreviousToolCallsFor(event.toolCallId);
         seenToolCallIds.add(event.toolCallId);
@@ -579,7 +600,11 @@ function handleAgentEvent(event: any) {
       renderApp();
       break;
     case "tool_execution_update":
+      activityMessage = `Running ${event.toolName || event.name || event.toolCall?.name || "tool"}...`;
+      renderApp();
+      break;
     case "tool_execution_end":
+      activityMessage = "Processing tool result...";
       renderApp();
       break;
   }
@@ -619,6 +644,11 @@ function scrollMessagesToBottom(force = false) {
 
 function handleSend(input: string) {
   if (!input.trim() || isStreaming) return;
+  const prompt = input.trimEnd();
+  if (promptHistory.at(-1) !== prompt) promptHistory.push(prompt);
+  if (promptHistory.length > 200) promptHistory.shift();
+  promptHistoryIndex = undefined;
+  promptHistoryDraft = "";
   send({ type: "prompt", text: input });
 
   const editor = document.querySelector("message-editor") as MessageEditor | null;
@@ -706,9 +736,26 @@ function toggleMobileControls() {
   renderApp();
 }
 
-function handleLoadSession(sessionPath: string) {
-  if (sessionPath === currentSessionPath) return;
-  send({ type: "loadSession", sessionPath });
+function updateSessionUrl(sessionId: string) {
+  const params = new URLSearchParams(location.search);
+  if (sessionId) params.set("session", sessionId);
+  else params.delete("session");
+  params.delete("sessionId");
+  params.delete("sessionPath");
+  history.replaceState(history.state, "", `${location.pathname}${params.size ? `?${params}` : ""}${location.hash}`);
+}
+
+function handleLoadSession(session: SessionListItem) {
+  if (session.id === currentSessionId) return;
+  updateSessionUrl(session.id);
+  send({ type: "loadSession", sessionId: session.id });
+}
+
+function handleDeleteSession(event: Event, session: SessionListItem) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!confirm(`Delete ${sessionTitle(session)}?`)) return;
+  send({ type: "deleteSession", sessionId: session.id });
 }
 
 function startRenameSession(event: Event, session: SessionListItem) {
@@ -737,7 +784,7 @@ function submitRenameSession(event: Event, session: SessionListItem) {
   event.stopPropagation();
   const name = editingSessionName.trim();
   if (!name) return cancelRenameSession(event);
-  send({ type: "renameSession", sessionPath: session.path, name });
+  send({ type: "renameSession", sessionId: session.id, name });
   editingSessionPath = undefined;
   editingSessionName = "";
   renderApp();
@@ -760,9 +807,23 @@ document.addEventListener("click", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && sidebarOpen) {
-    closeSidebar();
+  if (e.key === "Escape" && sidebarOpen) closeSidebar();
+  if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+  const textarea = e.target as HTMLTextAreaElement | null;
+  if (!textarea || textarea.tagName !== "TEXTAREA" || isStreaming || promptHistory.length === 0) return;
+  const editor = textarea.closest("message-editor") as MessageEditor | null;
+  if (!editor) return;
+  e.preventDefault();
+  if (promptHistoryIndex === undefined) {
+    promptHistoryDraft = textarea.value;
+    promptHistoryIndex = promptHistory.length;
   }
+  promptHistoryIndex = e.key === "ArrowUp" ? Math.max(0, promptHistoryIndex - 1) : Math.min(promptHistory.length, promptHistoryIndex + 1);
+  const value = promptHistoryIndex === promptHistory.length ? promptHistoryDraft : promptHistory[promptHistoryIndex];
+  editor.value = value;
+  textarea.value = value;
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
 });
 
 // ── Render ──
@@ -813,6 +874,30 @@ function modelMatchesFilter(model: ModelInfo, filter: string): boolean {
   if (!needle) return true;
   return [model.provider, model.id, model.name, modelLabel(model)]
     .some((value) => value.toLowerCase().includes(needle));
+}
+
+function extractStartupSkills() {
+  const skills = [] as Array<{ name: string; description: string }>;
+  for (const block of systemPrompt.split("<skill>").slice(1)) {
+    const name = /<name>([\s\S]*?)<\/name>/.exec(block)?.[1]?.trim();
+    const description = /<description>([\s\S]*?)<\/description>/.exec(block)?.[1]?.trim() || "";
+    if (name) skills.push({ name, description });
+  }
+  return skills;
+}
+
+function renderStartupInfo() {
+  const skills = extractStartupSkills();
+  const list = (items: Array<{ name: string; description?: string }>, empty: string) => items.length
+    ? html`<span class="startup-inline-list">${items.map((item, index) => html`${index ? html`<span class="startup-inline-separator">·</span>` : nothing}<span class="startup-inline-item" title=${item.description || item.name}>${item.name}</span>`)}</span>`
+    : html`<span class="startup-muted">${empty}</span>`;
+  return html`<section class="startup-card">
+    <h1>${appTitle}</h1>
+    <p>Your Pi workspace is ready.</p>
+    <div class="startup-grid"><div class="startup-section"><h2>Model</h2><dl><div><dt>Current</dt><dd>${currentModel ? modelLabel(currentModel) : "No model selected"}</dd></div><div><dt>Thinking</dt><dd>${thinkingLevel}</dd></div></dl></div><div class="startup-section"><h2>Session</h2><dl><div><dt>Working directory</dt><dd>${currentCwd || "Not available"}</dd></div><div><dt>Session</dt><dd>${currentSessionName || currentSessionId || "New"}</dd></div></dl></div></div>
+    <div class="startup-section"><h2>Tools</h2>${list(toolNames.map((name) => ({ name })), "No tools active.")}</div>
+    <div class="startup-section"><h2>Skills</h2>${list(skills, "No skills advertised.")}</div>
+  </section>`;
 }
 
 function renderSidebar() {
@@ -868,7 +953,7 @@ function renderSidebar() {
               ` : html`
                 <button
                   class="session-item"
-                  @click=${() => handleLoadSession(s.path)}
+                  @click=${() => handleLoadSession(s)}
                 >
                   <div class="session-item-title">${sessionTitle(s)}</div>
                   ${s.name && s.firstMessage ? html`
@@ -886,6 +971,13 @@ function renderSidebar() {
                   aria-label="Rename conversation ${sessionTitle(s)}"
                   @click=${(event: Event) => startRenameSession(event, s)}
                 >${icon(Pencil, "sm")}</button>
+                <button
+                  class="session-action-button"
+                  type="button"
+                  title="Delete conversation"
+                  aria-label="Delete conversation ${sessionTitle(s)}"
+                  @click=${(event: Event) => handleDeleteSession(event, s)}
+                >${icon(Trash2, "sm")}</button>
               `}
             </div>
           `)}
@@ -1175,7 +1267,7 @@ function renderApp() {
           ${sidebarOpen ? icon(PanelLeftClose, "sm") : icon(Menu, "sm")}
         </button>
 
-        <span class="font-semibold text-sm shrink-0 hidden sm:inline">Pi Web UI</span>
+        <span class="font-semibold text-sm shrink-0 hidden sm:inline">${appTitle}</span>
 
         <span class="status-pill px-1.5 py-0.5 rounded-full shrink-0 ${connected ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}">
           ${connected ? "Connected" : "Disconnected"}
@@ -1285,11 +1377,18 @@ function renderApp() {
         </div>
       ` : ""}
 
+      ${compactionActive || activityMessage || lastCompactionStatus ? html`
+        <div class="compaction-notice ${lastCompactionStatus && !compactionActive && !activityMessage ? "compaction-notice-complete" : ""}" role="status" aria-live="polite">
+          ${compactionActive || activityMessage ? html`<span class="compaction-spinner"></span>` : nothing}
+          <span>${compactionActive ? compactionMessage : activityMessage || lastCompactionStatus}</span>
+        </div>
+      ` : nothing}
+
       <!-- Messages area -->
       <div class="flex-1 overflow-y-auto px-3 sm:px-4 py-4" id="messages-scroll" @scroll=${handleMessagesScroll}>
-        ${messages.length === 0 && !isStreaming ? html`
-          <div class="flex items-center justify-center h-full text-muted-foreground text-sm">
-            Send a message to start a conversation
+        ${messages.length === 0 && !isStreaming && !compactionActive ? html`
+          <div class="max-w-4xl mx-auto">
+            ${renderStartupInfo()}
           </div>
         ` : html`
           <div class="max-w-4xl mx-auto flex flex-col gap-3">

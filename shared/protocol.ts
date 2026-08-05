@@ -12,8 +12,9 @@ export type ClientMessage =
   | { type: "newSession" }
   | { type: "getSessions"; offset?: number; limit?: number; query?: string }
   | { type: "getMessages"; offset: number; limit?: number }
-  | { type: "loadSession"; sessionPath: string }
-  | { type: "renameSession"; sessionPath: string; name: string }
+  | { type: "loadSession"; sessionPath?: string; sessionId?: string }
+  | { type: "deleteSession"; sessionPath?: string; sessionId?: string }
+  | { type: "renameSession"; sessionPath?: string; sessionId?: string; name: string }
   | { type: "choiceResponse"; requestId: string; selected: string[] };
 
 // ── Server → Client messages ──
@@ -60,6 +61,8 @@ export interface SerializedAgentState {
   streamingMessage?: any;
   errorMessage?: string;
   tools: string[];
+  cwd?: string;
+  appTitle?: string;
   sessionId: string;
   sessionName?: string;
   sessionPath?: string;

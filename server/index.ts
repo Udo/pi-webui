@@ -7,16 +7,15 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { WebSocketServer, WebSocket } from "ws";
 import {
-  AuthStorage,
   createAgentSession,
-  ModelRegistry,
+  ModelRuntime,
   SessionManager,
   defineTool,
   DefaultResourceLoader,
   SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   canReadFile,
   createParsingState,
@@ -25,7 +24,7 @@ import {
   recordRead,
   type ParsingLimits,
 } from "./parsing-budget.js";
-import { Type, type Model, type Api } from "@mariozechner/pi-ai";
+import { Type, type Model, type Api } from "@earendil-works/pi-ai";
 import type {
   ClientMessage,
   ServerMessage,
@@ -50,6 +49,7 @@ const HOST = process.env.HOST || "127.0.0.1";
 const LITELLM_URL = process.env.LITELLM_URL || "";
 const LITELLM_TIMEOUT_MS = parseIntEnv("LITELLM_TIMEOUT_MS", 1500);
 let litellmKey = process.env.LITELLM_KEY || "";
+const APP_TITLE = (process.env.PI_WEBUI_TITLE || "Pi Web UI").trim().slice(0, 120) || "Pi Web UI";
 
 const app = express();
 const server = createServer(app);
@@ -173,6 +173,8 @@ wss.on("headers", (headers) => {
 const HOME_DIR = os.homedir();
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(HOME_DIR, ".pi", "agent");
 const AGENT_SETTINGS_PATH = path.join(AGENT_DIR, "settings.json");
+const AGENT_AUTH_PATH = path.join(AGENT_DIR, "auth.json");
+const AGENT_MODELS_PATH = path.join(AGENT_DIR, "models.json");
 const USER_SKILLS_DIR = process.env.PI_WEBUI_USER_SKILLS_DIR || path.join(HOME_DIR, ".pi", "skills");
 const SHARED_SKILLS_DIR = process.env.PI_WEBUI_SHARED_SKILLS_DIR || path.join(AGENT_DIR, "skills");
 const SESSION_LIST_LIMIT = parseIntEnv("SESSION_LIST_LIMIT", 30);
@@ -181,8 +183,7 @@ const MESSAGE_PAGE_LIMIT = parseIntEnv("MESSAGE_PAGE_LIMIT", 60);
 const MESSAGE_PAGE_MAX_LIMIT = parseIntEnv("MESSAGE_PAGE_MAX_LIMIT", 200);
 const SESSION_LIST_CACHE_MS = parseIntEnv("SESSION_LIST_CACHE_MS", 10000);
 
-let authStorage: AuthStorage;
-let modelRegistry: ModelRegistry;
+let modelRuntime: ModelRuntime;
 type ChoiceRequest = {
   id: string;
   prompt: string;
@@ -195,10 +196,12 @@ type PendingChoiceRequest = ChoiceRequest & {
   reject: (error: Error) => void;
 };
 
-type ClientRuntime = { session: AgentSession; unsubscribe?: () => void; pendingChoices?: Map<string, PendingChoiceRequest> };
+type ClientRuntime = { session: AgentSession; unsubscribe?: () => void; pendingChoices?: Map<string, PendingChoiceRequest>; refreshSessionsWhenPersisted?: boolean };
 const clients = new Map<WebSocket, ClientRuntime>();
 const syntheticModels = new Map<string, Model<Api>>();
 let modelConfigStamp = "";
+let modelAuthStamp = "";
+let modelConfigRefreshPromise: Promise<void> | undefined;
 let sessionListCache: { expires: number; files: { filePath: string; mtime: Date }[] } | undefined;
 
 function boolEnv(name: string): boolean {
@@ -395,17 +398,26 @@ function fileStamp(filePath: string): string {
   }
 }
 
-function refreshModelConfigIfChanged() {
-  const nextStamp = [
-    fileStamp(path.join(AGENT_DIR, "auth.json")),
-    fileStamp(path.join(AGENT_DIR, "models.json")),
-    fileStamp(AGENT_SETTINGS_PATH),
-  ].join("|");
+async function refreshModelConfig() {
+  const nextAuthStamp = fileStamp(AGENT_AUTH_PATH);
+  const nextStamp = [nextAuthStamp, fileStamp(AGENT_MODELS_PATH), fileStamp(AGENT_SETTINGS_PATH)].join("|");
   if (nextStamp === modelConfigStamp) return;
+  if (modelAuthStamp && nextAuthStamp !== modelAuthStamp) {
+    modelRuntime = await ModelRuntime.create({ authPath: AGENT_AUTH_PATH, modelsPath: AGENT_MODELS_PATH });
+    for (const ws of clients.keys()) ws.close(1012, "Model credentials changed");
+  } else {
+    await modelRuntime?.refresh({ allowNetwork: false });
+  }
+  modelAuthStamp = nextAuthStamp;
   modelConfigStamp = nextStamp;
-  authStorage?.reload();
-  modelRegistry?.refresh();
   syntheticModels.clear();
+}
+
+function refreshModelConfigIfChanged() {
+  if (!modelConfigRefreshPromise) {
+    modelConfigRefreshPromise = refreshModelConfig().finally(() => { modelConfigRefreshPromise = undefined; });
+  }
+  return modelConfigRefreshPromise;
 }
 
 function modelToInfo(model: Model<Api>, scoped = false): ModelInfo {
@@ -541,6 +553,8 @@ function serializeState(session: AgentSession, overrides: Partial<Pick<Serialize
     streamingMessage: hasStreamingMessageOverride ? overrides.streamingMessage : state.streamingMessage,
     errorMessage: state.errorMessage,
     tools: session.getActiveToolNames(),
+    cwd: (session as any)._cwd || (session as any).cwd,
+    appTitle: APP_TITLE,
     sessionId: session.sessionId,
     sessionName: session.sessionName,
     sessionPath: session.sessionFile,
@@ -718,6 +732,48 @@ function resolveSessionPath(candidate: string): string | undefined {
   return requestedPath;
 }
 
+async function resolveSessionPathById(sessionId: string | undefined): Promise<string | undefined> {
+  if (!sessionId || !/^[A-Za-z0-9_-]{6,128}$/.test(sessionId)) return undefined;
+  const entries = await readDirectoryEntriesLimited(getSessionDir(HOME_DIR), SESSION_DIRECTORY_SCAN_LIMIT);
+  const direct = entries.find((entry) => entry.isFile() && entry.name.endsWith(`_${sessionId}.jsonl`));
+  if (direct) {
+    const filePath = path.join(getSessionDir(HOME_DIR), direct.name);
+    const state = createParsingState();
+    const content = await readSessionHead(filePath, state);
+    const stats = await fs.promises.stat(filePath).catch(() => undefined);
+    if (stats && sessionItemFromContent(filePath, content || "", stats.mtime)?.id === sessionId) return filePath;
+  }
+  const state = createParsingState();
+  for (const { filePath, mtime } of await sessionFiles()) {
+    const content = await readSessionHead(filePath, state);
+    if (sessionItemFromContent(filePath, content || "", mtime)?.id === sessionId) return filePath;
+    if (state.stopReason) break;
+  }
+  return undefined;
+}
+
+async function resolveRequestedSessionPath(request: { sessionPath?: string; sessionId?: string }): Promise<string | undefined> {
+  return request.sessionPath ? resolveSessionPath(request.sessionPath) : resolveSessionPathById(request.sessionId);
+}
+
+const sessionPathLocks = new Map<string, Promise<void>>();
+
+async function withSessionPathLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+  const key = path.resolve(filePath);
+  const previous = sessionPathLocks.get(key) || Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.then(() => gate);
+  sessionPathLocks.set(key, tail);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (sessionPathLocks.get(key) === tail) sessionPathLocks.delete(key);
+  }
+}
+
 function sessionManagerForResumePath(candidate: string | undefined): SessionManager {
   if (!candidate) return SessionManager.create(HOME_DIR, getSessionDir(HOME_DIR));
   const requestedPath = resolveSessionPath(candidate);
@@ -784,8 +840,8 @@ function buildSyntheticModel(provider: string, modelId: string): Model<Api> | un
   const existing = syntheticModels.get(key);
   if (existing) return existing;
 
-  const providerModels = modelRegistry.getAll().filter((m) => m.provider === provider);
-  const base = providerModels.find((m) => modelRegistry.hasConfiguredAuth(m)) || providerModels[0];
+  const providerModels = modelRuntime.getModels(provider);
+  const base = providerModels[0];
   if (!base) return undefined;
 
   const model: Model<Api> = {
@@ -798,10 +854,10 @@ function buildSyntheticModel(provider: string, modelId: string): Model<Api> | un
 }
 
 function findConfiguredOrSyntheticModel(provider: string, modelId: string): Model<Api> | undefined {
-  const model = modelRegistry.find(provider, modelId) || syntheticModels.get(modelKey(provider, modelId));
-  if (model && modelRegistry.hasConfiguredAuth(model)) return model;
+  const model = modelRuntime.getModel(provider, modelId) || syntheticModels.get(modelKey(provider, modelId));
+  if (model && modelRuntime.hasConfiguredAuth(provider)) return model;
   const synthetic = buildSyntheticModel(provider, modelId);
-  return synthetic && modelRegistry.hasConfiguredAuth(synthetic) ? synthetic : undefined;
+  return synthetic && modelRuntime.hasConfiguredAuth(provider) ? synthetic : undefined;
 }
 
 function addModelInfo(merged: ModelInfo[], seen: Set<string>, model: Model<Api>, scoped = false) {
@@ -836,10 +892,10 @@ function scopedModelKeys(settings: any): Set<string> {
 }
 
 async function getRegistryModels(): Promise<ModelInfo[]> {
-  refreshModelConfigIfChanged();
+  await refreshModelConfigIfChanged();
   const settings = readAgentSettings();
-  const available = await modelRegistry.getAvailable();
-  const configured = available.filter((m) => modelRegistry.hasConfiguredAuth(m));
+  const available = await modelRuntime.getAvailable();
+  const configured = available.filter((m) => modelRuntime.hasConfiguredAuth(m.provider));
   const source = configured.length > 0 ? configured : available;
   const merged: ModelInfo[] = [];
   const seen = new Set<string>();
@@ -946,10 +1002,10 @@ async function resolveInitialWebUiModel(): Promise<Model<Api> | undefined> {
     }
   }
 
-  const available = await modelRegistry.getAvailable();
-  return available.find((m) => m.provider === "local" && modelRegistry.hasConfiguredAuth(m))
-    || available.find((m) => m.provider !== "anthropic" && modelRegistry.hasConfiguredAuth(m))
-    || available.find((m) => modelRegistry.hasConfiguredAuth(m));
+  const available = await modelRuntime.getAvailable();
+  return available.find((m) => m.provider === "local" && modelRuntime.hasConfiguredAuth(m.provider))
+    || available.find((m) => m.provider !== "anthropic" && modelRuntime.hasConfiguredAuth(m.provider))
+    || available.find((m) => modelRuntime.hasConfiguredAuth(m.provider));
 }
 
 const requestChoiceParams = Type.Object({
@@ -996,8 +1052,21 @@ function createRequestChoiceTool(onChoiceRequest: (request: ChoiceRequest, signa
   });
 }
 
+function assertSessionResources(session: AgentSession, resourceLoader: DefaultResourceLoader) {
+  const requiredToolNames = ["read", "bash", "edit", "write", "request-choice"];
+  const activeToolNames = new Set(session.getActiveToolNames());
+  const missingTools = requiredToolNames.filter((name) => !activeToolNames.has(name));
+  if (missingTools.length > 0) throw new Error(`Session startup did not activate these tools: ${missingTools.join(", ")}`);
+
+  const prompt = session.agent.state.systemPrompt;
+  const missingSkills = resourceLoader.getSkills().skills
+    .filter((skill) => !skill.disableModelInvocation && !prompt.includes(`<name>${skill.name}</name>`))
+    .map((skill) => skill.name);
+  if (missingSkills.length > 0) throw new Error(`Session startup did not advertise these skills: ${missingSkills.join(", ")}`);
+}
+
 async function createWebUiSession(sessionManager: SessionManager, onChoiceRequest: (request: ChoiceRequest, signal?: AbortSignal) => Promise<string[]>) {
-  refreshModelConfigIfChanged();
+  await refreshModelConfigIfChanged();
   const restoredModel = restorableSessionModel(sessionManager);
   const initialModel = restoredModel ? undefined : await resolveInitialWebUiModel();
   const initialThinkingLevel = restoredModel ? undefined : defaultThinkingLevelFromSettings();
@@ -1013,8 +1082,7 @@ async function createWebUiSession(sessionManager: SessionManager, onChoiceReques
   const result = await createAgentSession({
     cwd: HOME_DIR,
     agentDir: AGENT_DIR,
-    authStorage,
-    modelRegistry,
+    modelRuntime,
     sessionManager,
     model: initialModel,
     thinkingLevel: initialThinkingLevel,
@@ -1023,7 +1091,7 @@ async function createWebUiSession(sessionManager: SessionManager, onChoiceReques
     resourceLoader,
   });
   if (!restoredModel) applyDefaultThinkingLevel(result.session);
-  result.session.setActiveToolsByName([...new Set([...result.session.getActiveToolNames(), ...customTools.map((tool) => tool.name)])]);
+  assertSessionResources(result.session, resourceLoader);
   return result;
 }
 
@@ -1078,16 +1146,18 @@ function setupSessionEvents(ws: WebSocket, runtime: ClientRuntime) {
     const safeEvent = safeSerializeEvent(event);
     send(ws, { type: "agentEvent", event: safeEvent });
 
-    if (event.type === "message_end" || event.type === "turn_end") {
-      clearSessionListCache();
+    if (event.type === "message_end" || event.type === "turn_end") clearSessionListCache();
+    if (event.type === "message_end" && runtime.refreshSessionsWhenPersisted) {
+      setImmediate(() => {
+        if (clients.get(ws) !== runtime || !runtime.session.sessionFile || !fs.existsSync(runtime.session.sessionFile)) return;
+        runtime.refreshSessionsWhenPersisted = false;
+        listRecentSessions().then((sessionPage) => {
+          if (clients.get(ws) === runtime) send(ws, { type: "sessions", sessions: sessionPage.items, currentSessionId: runtime.session.sessionId, offset: sessionPage.offset, limit: sessionPage.limit, total: sessionPage.total, hasMore: sessionPage.hasMore, query: sessionPage.query });
+        }).catch((err) => console.error("Failed to refresh sessions after persistence:", err));
+      });
     }
 
-    if (
-      event.type === "agent_start" ||
-      event.type === "agent_end" ||
-      event.type === "message_end" ||
-      event.type === "turn_end"
-    ) {
+    if (["agent_start", "agent_end", "message_end", "turn_end", "compaction_end"].includes(event.type)) {
       const state = event.type === "agent_end"
         ? serializeState(runtime.session, { isStreaming: false, streamingMessage: null })
         : serializeState(runtime.session);
@@ -1108,9 +1178,10 @@ function isClientMessage(value: any): value is ClientMessage {
     case "setThinkingLevel":
       return typeof value.level === "string";
     case "loadSession":
-      return typeof value.sessionPath === "string";
+    case "deleteSession":
+      return typeof value.sessionPath === "string" || typeof value.sessionId === "string";
     case "renameSession":
-      return typeof value.sessionPath === "string" && typeof value.name === "string" && value.name.length <= 200;
+      return (typeof value.sessionPath === "string" || typeof value.sessionId === "string") && typeof value.name === "string" && value.name.length <= 200;
     case "choiceResponse":
       return typeof value.requestId === "string" && value.requestId.length <= 200 && Array.isArray(value.selected) && value.selected.length <= 8 && value.selected.every((item: any) => typeof item === "string" && item.length <= 80);
     case "getMessages":
@@ -1186,7 +1257,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         break;
       }
       case "setModel": {
-        refreshModelConfigIfChanged();
+        await refreshModelConfigIfChanged();
         let model: Model<Api> | undefined;
         for (const candidate of buildModelLookupCandidates(msg.provider, msg.modelId)) {
           model = findModel(candidate.provider, candidate.modelId);
@@ -1231,7 +1302,10 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
 
         clearPendingChoices(ws, runtime, "Session changed");
         const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR, getSessionDir(HOME_DIR)), (request, signal) => waitForChoiceResponse(ws, runtime.pendingChoices!, request, signal));
+        const previousSession = runtime.session;
         runtime.session = newSession;
+        runtime.refreshSessionsWhenPersisted = true;
+        previousSession.dispose();
         session = runtime.session;
         clearSessionListCache();
         setupSessionEvents(ws, runtime);
@@ -1251,47 +1325,82 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage) {
         break;
       }
       case "renameSession": {
-        const requestedPath = resolveSessionPath(msg.sessionPath);
-        if (!requestedPath || !fs.existsSync(requestedPath)) {
+        const requestedPath = await resolveRequestedSessionPath(msg);
+        if (!requestedPath) {
           send(ws, { type: "error", message: "Session not found or outside the configured session directory" });
           return;
         }
-        const name = msg.name.trim().replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").slice(0, 120);
-        const currentSessionFile = session.sessionFile || "";
-        const renamingCurrent = currentSessionFile !== "" && path.resolve(requestedPath) === path.resolve(currentSessionFile);
-        if (renamingCurrent) {
-          (session as any).setSessionName(name);
-        } else {
-          const manager = SessionManager.open(requestedPath, getSessionDir(HOME_DIR), HOME_DIR);
-          manager.appendSessionInfo(name);
-        }
-        clearSessionListCache();
-        if (renamingCurrent) send(ws, { type: "stateSync", state: serializeState(session) });
+        await withSessionPathLock(requestedPath, async () => {
+          if (!fs.existsSync(requestedPath)) throw new Error("Session not found or outside the configured session directory");
+          const name = msg.name.trim().replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").slice(0, 120);
+          const currentSessionFile = session.sessionFile || "";
+          const renamingCurrent = currentSessionFile !== "" && path.resolve(requestedPath) === path.resolve(currentSessionFile);
+          if (renamingCurrent) {
+            (session as any).setSessionName(name);
+          } else {
+            SessionManager.open(requestedPath, getSessionDir(HOME_DIR), HOME_DIR).appendSessionInfo(name);
+          }
+          clearSessionListCache();
+          if (renamingCurrent) send(ws, { type: "stateSync", state: serializeState(session) });
+        });
         const sessionPage = await listRecentSessions();
         send(ws, { type: "sessions", sessions: sessionPage.items, currentSessionId: session.sessionId, offset: sessionPage.offset, limit: sessionPage.limit, total: sessionPage.total, hasMore: sessionPage.hasMore, query: sessionPage.query });
         break;
       }
       case "loadSession": {
-        if (session.isStreaming) {
-          await session.abort();
-        }
-
-        const requestedPath = resolveSessionPath(msg.sessionPath);
+        if (session.isStreaming) await session.abort();
+        const requestedPath = await resolveRequestedSessionPath(msg);
         if (!requestedPath) {
-          send(ws, { type: "error", message: "Refusing to load session outside the configured session directory" });
+          send(ws, { type: "error", message: "Session not found or outside the configured session directory" });
           return;
         }
-
-        const loadedManager = SessionManager.open(requestedPath, getSessionDir(HOME_DIR), HOME_DIR);
-        clearPendingChoices(ws, runtime, "Session changed");
-        const { session: loadedSession } = await createWebUiSession(loadedManager, (request, signal) => waitForChoiceResponse(ws, runtime.pendingChoices!, request, signal));
-        runtime.session = loadedSession;
-        session = runtime.session;
-        clearSessionListCache();
-        setupSessionEvents(ws, runtime);
-        send(ws, { type: "sessionChanged", sessionId: session.sessionId });
-        send(ws, { type: "stateSync", state: serializeState(session) });
+        await withSessionPathLock(requestedPath, async () => {
+          if (!fs.existsSync(requestedPath)) throw new Error("Session not found or outside the configured session directory");
+          const loadedManager = SessionManager.open(requestedPath, getSessionDir(HOME_DIR), HOME_DIR);
+          clearPendingChoices(ws, runtime, "Session changed");
+          const { session: loadedSession } = await createWebUiSession(loadedManager, (request, signal) => waitForChoiceResponse(ws, runtime.pendingChoices!, request, signal));
+          const previousSession = runtime.session;
+          runtime.session = loadedSession;
+          previousSession.dispose();
+          session = runtime.session;
+          clearSessionListCache();
+          setupSessionEvents(ws, runtime);
+          send(ws, { type: "sessionChanged", sessionId: session.sessionId });
+          send(ws, { type: "stateSync", state: serializeState(session) });
+        });
         console.log(`Loaded session: ${session.sessionId}`);
+        break;
+      }
+      case "deleteSession": {
+        const requestedPath = await resolveRequestedSessionPath(msg);
+        if (!requestedPath) {
+          send(ws, { type: "error", message: "Session not found or outside the configured session directory" });
+          return;
+        }
+        await withSessionPathLock(requestedPath, async () => {
+          if (!fs.existsSync(requestedPath)) throw new Error("Session not found or outside the configured session directory");
+          const canonicalTarget = path.resolve(requestedPath);
+          const usedByAnotherClient = [...clients.entries()].some(([client, other]) => client !== ws && other.session.sessionFile && path.resolve(other.session.sessionFile) === canonicalTarget);
+          if (usedByAnotherClient) throw new Error("Cannot delete a conversation that is active in another client");
+          const deletingCurrent = Boolean(session.sessionFile) && canonicalTarget === path.resolve(session.sessionFile!);
+          if (deletingCurrent && session.isStreaming) await session.abort();
+          await fs.promises.unlink(requestedPath);
+          clearSessionListCache();
+          if (deletingCurrent) {
+            clearPendingChoices(ws, runtime, "Session deleted");
+            const { session: newSession } = await createWebUiSession(SessionManager.create(HOME_DIR, getSessionDir(HOME_DIR)), (request, signal) => waitForChoiceResponse(ws, runtime.pendingChoices!, request, signal));
+            const previousSession = runtime.session;
+            runtime.session = newSession;
+            runtime.refreshSessionsWhenPersisted = true;
+            previousSession.dispose();
+            session = newSession;
+            setupSessionEvents(ws, runtime);
+            send(ws, { type: "sessionChanged", sessionId: session.sessionId });
+            send(ws, { type: "stateSync", state: serializeState(session) });
+          }
+        });
+        const sessionPage = await listRecentSessions();
+        send(ws, { type: "sessions", sessions: sessionPage.items, currentSessionId: session.sessionId, offset: sessionPage.offset, limit: sessionPage.limit, total: sessionPage.total, hasMore: sessionPage.hasMore, query: sessionPage.query });
         break;
       }
     }
@@ -1370,38 +1479,69 @@ async function main() {
     throw new Error("PI_WEBUI_TOKEN is required. Anonymous mode is allowed only when PI_WEBUI_ALLOW_ANONYMOUS=true and HOST is loopback.");
   }
 
-  authStorage = AuthStorage.create(path.join(AGENT_DIR, "auth.json"));
-  modelRegistry = ModelRegistry.create(authStorage, path.join(AGENT_DIR, "models.json"));
+  modelRuntime = await ModelRuntime.create({ authPath: AGENT_AUTH_PATH, modelsPath: AGENT_MODELS_PATH });
+  modelAuthStamp = fileStamp(AGENT_AUTH_PATH);
+  modelConfigStamp = [modelAuthStamp, fileStamp(AGENT_MODELS_PATH), fileStamp(AGENT_SETTINGS_PATH)].join("|");
+  setInterval(() => refreshModelConfigIfChanged().catch((err) => console.error("Model configuration refresh failed:", err)), 2000).unref();
 
   if (!litellmKey) {
-    const key = await modelRegistry.getApiKeyForProvider("ollama");
-    if (key) litellmKey = key;
+    const auth = await modelRuntime.getAuth("ollama");
+    if (auth?.auth.apiKey) litellmKey = auth.auth.apiKey;
   }
 
   wss.on("connection", async (ws, request) => {
     console.log(`Client connected (${clients.size + 1} total)`);
+    let closed = false;
+    let startingSession: AgentSession | undefined;
+    ws.once("close", () => {
+      closed = true;
+      const runtime = clients.get(ws);
+      if (runtime?.unsubscribe) runtime.unsubscribe();
+      if (runtime) clearPendingChoices(ws, runtime, "Client disconnected");
+      const activeSession = runtime?.session || startingSession;
+      if (activeSession) {
+        const aborted = activeSession.isStreaming
+          ? activeSession.abort().catch((err: any) => console.error("Abort on disconnect failed:", err))
+          : Promise.resolve();
+        aborted.then(() => activeSession.dispose()).catch((err: any) => console.warn("Session dispose failed:", err));
+      }
+      clients.delete(ws);
+      console.log(`Client disconnected (${clients.size} total)`);
+    });
 
     try {
       const url = new URL(request.url || "/api/ws", `http://${request.headers.host || "localhost"}`);
-      const sessionManager = sessionManagerForResumePath(url.searchParams.get("sessionPath") || undefined);
+      const requestedPath = url.searchParams.get("sessionPath") || await resolveSessionPathById(url.searchParams.get("session") || url.searchParams.get("sessionId") || undefined);
       const pendingChoices = new Map<string, PendingChoiceRequest>();
-      const { session, modelFallbackMessage } = await createWebUiSession(sessionManager, (request, signal) => waitForChoiceResponse(ws, pendingChoices, request, signal));
-      const runtime: ClientRuntime = { session, pendingChoices };
-      clients.set(ws, runtime);
+      const createRuntime = async () => {
+        const sessionManager = sessionManagerForResumePath(requestedPath || undefined);
+        const result = await createWebUiSession(sessionManager, (request, signal) => waitForChoiceResponse(ws, pendingChoices, request, signal));
+        startingSession = result.session;
+        if (closed) {
+          startingSession.dispose();
+          startingSession = undefined;
+          return undefined;
+        }
+        const runtime: ClientRuntime = { session: startingSession, pendingChoices, refreshSessionsWhenPersisted: !startingSession.sessionFile };
+        clients.set(ws, runtime);
+        startingSession = undefined;
+        return { ...result, runtime };
+      };
+      const created = requestedPath ? await withSessionPathLock(requestedPath, createRuntime) : await createRuntime();
+      if (!created) return;
+      const { session, modelFallbackMessage, runtime } = created;
 
-      if (modelFallbackMessage) {
-        console.log("Model fallback:", modelFallbackMessage);
-      }
-
+      if (modelFallbackMessage) console.log("Model fallback:", modelFallbackMessage);
       console.log(`Client session ${session.sessionId}: ${session.model?.provider}/${session.model?.id}, thinking ${session.thinkingLevel}, tools ${session.getActiveToolNames().join(", ")}`);
       setupSessionEvents(ws, runtime);
-
       send(ws, { type: "ready" });
       send(ws, { type: "stateSync", state: serializeState(session) });
     } catch (err: any) {
       console.error("Failed to create client session:", err);
-      send(ws, { type: "error", message: err.message || String(err) });
-      ws.close();
+      if (!closed) {
+        send(ws, { type: "error", message: err.message || String(err) });
+        ws.close();
+      }
       return;
     }
 
@@ -1419,16 +1559,6 @@ async function main() {
       }
     });
 
-    ws.on("close", () => {
-      const runtime = clients.get(ws);
-      if (runtime?.unsubscribe) runtime.unsubscribe();
-      if (runtime) clearPendingChoices(ws, runtime, "Client disconnected");
-      if (runtime?.session.isStreaming) {
-        runtime.session.abort().catch((err: any) => console.error("Abort on disconnect failed:", err));
-      }
-      clients.delete(ws);
-      console.log(`Client disconnected (${clients.size} total)`);
-    });
   });
 
   server.listen(PORT, HOST, () => {

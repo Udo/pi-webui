@@ -1,4 +1,4 @@
-@import "@mariozechner/pi-web-ui/app.css";
+@import "@earendil-works/pi-web-ui/app.css";
 
 @font-face {
   font-family: "B612";
@@ -479,6 +479,52 @@ textarea {
   50% { opacity: 1; }
 }
 
+.compaction-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--app-space-2);
+  padding: var(--app-space-2) var(--app-space-4);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.compaction-notice-complete { opacity: 0.82; }
+
+.compaction-spinner {
+  width: 0.8rem;
+  height: 0.8rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.startup-card {
+  max-width: 52rem;
+  margin: auto;
+  padding: clamp(1rem, 4vw, 2rem);
+  border: 1px solid var(--border);
+  border-radius: var(--app-radius);
+  background: var(--card);
+  color: var(--card-foreground);
+}
+
+.startup-card h1, .startup-card h2 { margin: 0; }
+.startup-card > p { margin: var(--app-space-2) 0 var(--app-space-4); color: var(--muted-foreground); }
+.startup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--app-space-4); }
+.startup-section { margin-top: var(--app-space-4); }
+.startup-section h2 { margin-bottom: var(--app-space-2); font-size: inherit; }
+.startup-section dl { margin: 0; }
+.startup-section dl div { display: grid; grid-template-columns: 9rem minmax(0, 1fr); gap: var(--app-space-2); }
+.startup-section dt { color: var(--muted-foreground); }
+.startup-section dd { margin: 0; overflow-wrap: anywhere; }
+.startup-inline-list { line-height: 1.65; overflow-wrap: anywhere; }
+.startup-inline-item { font-weight: var(--app-font-weight-strong); color: var(--accent-foreground); cursor: help; }
+.startup-inline-separator { margin: 0 var(--app-space-1); color: var(--muted-foreground); }
+.startup-muted { color: var(--muted-foreground); }
+
 .choice-request-card {
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -804,6 +850,16 @@ textarea {
     display: flex;
     flex-direction: column;
   }
+
+  .sidebar-panel { width: min(92vw, 340px); max-width: min(92vw, 340px); }
+
+  .session-action-button { opacity: 1; }
+
+  .progressive-tool-header { align-items: flex-start; }
+
+  .startup-grid { grid-template-columns: 1fr; }
+
+  .startup-section dl div { grid-template-columns: 1fr; gap: 0; }
 
   .topbar-control-menu .relative,
   .topbar-control-menu .model-button,

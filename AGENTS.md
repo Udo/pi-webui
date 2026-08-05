@@ -2,14 +2,14 @@
 
 ## Project overview
 
-This is a full-stack web UI for the Pi coding agent. The server runs a real Pi `AgentSession` with system-level tools (bash, file I/O, extensions). The client is a Lit-based SPA using `@mariozechner/pi-web-ui` components. They communicate over a JSON WebSocket protocol defined in `shared/protocol.ts`.
+This is a full-stack web UI for the Pi coding agent. The server runs a real Pi `AgentSession` with system-level tools (bash, file I/O, extensions). The client is a Lit-based SPA using `@earendil-works/pi-web-ui` components. They communicate over a JSON WebSocket protocol defined in `shared/protocol.ts`.
 
 ## Key conventions
 
 - **No client framework beyond Lit templates** — the app uses module-level state plus plain Lit `html` templates in `client/main.ts`; call `renderApp()` after state mutation.
-- **Pi SDK types** come from `@mariozechner/pi-coding-agent` (server) and `@mariozechner/pi-agent-core` / `@mariozechner/pi-ai` (shared types). Do not duplicate SDK types — import them.
+- **Pi SDK types** come from `@earendil-works/pi-coding-agent` (server) and `@earendil-works/pi-agent-core` / `@earendil-works/pi-ai` (shared types). Do not duplicate SDK types — import them.
 - **Protocol changes** must update `shared/protocol.ts` (the `ClientMessage` and `ServerMessage` unions), the server handler in `handleClientMessage()`, and the client handler in `handleServerMessage()`.
-- **CSS** uses Tailwind utility classes in Lit templates plus custom CSS in `client/app.css`. Theme variables come from `@mariozechner/pi-web-ui/app.css` — override them in `app.css` `:root` / `.dark` blocks.
+- **CSS** uses Tailwind utility classes in Lit templates plus custom CSS in `client/app.css`. Theme variables come from `@earendil-works/pi-web-ui/app.css` — override them in `app.css` `:root` / `.dark` blocks.
 - The sidebar uses plain CSS transitions. Desktop uses `position: relative` with width animation; mobile uses `position: fixed` with transform.
 
 ## Runtime and security posture
